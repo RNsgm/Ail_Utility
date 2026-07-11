@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 use ArchiveUtils::decoder::AilDecoder;
 use ArchiveUtils::encoder::format::{
-    AilHeader, CompressionType, index_offset_from_header, read_index_entries,
+    index_offset_from_header, read_index_entries, AilHeader, CompressionType,
 };
 use ArchiveUtils::encoder::{AilBuilder, EncoderError};
 
@@ -47,7 +47,11 @@ fn ail_roundtrip_preserves_payload() -> Result<(), Box<dyn std::error::Error>> {
     with_test_key(|| {
         let original = tiny_png();
         let mut builder = AilBuilder::new().with_thumbnail_size(64);
-        builder.add_image("page.png".to_string(), original.clone(), CompressionType::Zstd)?;
+        builder.add_image(
+            "page.png".to_string(),
+            original.clone(),
+            CompressionType::Zstd,
+        )?;
 
         let mut output = Vec::new();
         builder.build(&mut output)?;

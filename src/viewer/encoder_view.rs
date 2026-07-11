@@ -48,7 +48,7 @@ impl EncoderView {
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) {
         self.process_messages();
 
-        theme::inset_content(ui, |ui| {
+        theme::scrollable_inset_page(ui, |ui| {
             ui.vertical(|ui| {
                 theme::page_header(
                     ui,
@@ -100,6 +100,7 @@ impl EncoderView {
                     }
                 });
 
+                theme::section_gap(ui);
                 theme::section_card(ui, "2. Папка сохранения", |ui| {
                     ui.horizontal(|ui| {
                         if ui.button("📁 Выбрать").clicked() {
@@ -118,6 +119,7 @@ impl EncoderView {
                     });
                 });
 
+                theme::section_gap(ui);
                 theme::section_card(ui, "3. Настройки", |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Сжатие:");

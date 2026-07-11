@@ -4,13 +4,14 @@ use egui::{
     Color32, Context, CornerRadius, Frame, Margin, RichText, Shadow, Stroke, Ui, Vec2,
 };
 
-pub const NAV_WIDTH: f32 = 200.0;
+pub const NAV_WIDTH: f32 = 216.0;
 pub const CARD_RADIUS: f32 = 10.0;
 pub const THUMB_RADIUS: f32 = 10.0;
 pub const CONTENT_PAD: f32 = 28.0;
 pub const SECTION_GAP: f32 = 16.0;
 pub const CARD_INNER_X: i8 = 22;
 pub const CARD_INNER_Y: i8 = 18;
+pub const NAV_ITEM_INSET: f32 = 10.0;
 
 pub fn bg() -> Color32 {
     Color32::from_rgb(16, 18, 24)
@@ -125,7 +126,6 @@ pub fn card_frame() -> Frame {
 }
 
 pub fn section_card<R>(ui: &mut Ui, title: &str, add_body: impl FnOnce(&mut Ui) -> R) -> R {
-    ui.add_space(SECTION_GAP);
     card_frame().show(ui, |ui| {
         ui.label(RichText::new(title).strong().size(15.0).color(text()));
         ui.add_space(12.0);
@@ -138,11 +138,32 @@ pub fn section_card<R>(ui: &mut Ui, title: &str, add_body: impl FnOnce(&mut Ui) 
     .inner
 }
 
+pub fn section_gap(ui: &mut Ui) {
+    ui.add_space(SECTION_GAP);
+}
+
+pub fn scrollable_inset_page<R>(ui: &mut Ui, add_body: impl FnOnce(&mut Ui) -> R) -> R {
+    let height = ui.available_height();
+    egui::ScrollArea::vertical()
+        .id_salt("tool_page_scroll")
+        .auto_shrink([false; 2])
+        .max_height(height.max(120.0))
+        .show(ui, |ui| {
+            inset_content(ui, add_body)
+        })
+        .inner
+}
+
 pub fn inset_content<R>(ui: &mut Ui, add_body: impl FnOnce(&mut Ui) -> R) -> R {
     ui.add_space(16.0);
     ui.horizontal(|ui| {
         ui.add_space(CONTENT_PAD);
-        let result = ui.vertical(add_body).inner;
+        let result = ui
+            .vertical(|ui| {
+                ui.set_max_width(ui.available_width());
+                add_body(ui)
+            })
+            .inner;
         ui.add_space(CONTENT_PAD);
         result
     })
@@ -165,7 +186,7 @@ pub fn page_header(ui: &mut Ui, title: &str, subtitle: Option<&str>) {
 pub fn toolbar_frame() -> Frame {
     Frame::new()
         .fill(panel())
-        .inner_margin(Margin::symmetric(12, 8))
+        .inner_margin(Margin::symmetric(16, 12))
         .stroke(Stroke::new(1.0, border()))
 }
 
@@ -177,35 +198,40 @@ pub fn media_bar_frame() -> Frame {
 }
 
 pub fn nav_button(ui: &mut Ui, active: bool, icon: &str, label: &str) -> bool {
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 42.0), egui::Sense::click());
+    ui.horizontal(|ui| {
+        ui.add_space(NAV_ITEM_INSET);
+        let width = ui.available_width() - NAV_ITEM_INSET;
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, 44.0), egui::Sense::click());
 
-    let bg = if active {
-        accent_soft()
-    } else if response.hovered() {
-        card_hover()
-    } else {
-        Color32::TRANSPARENT
-    };
-    if bg != Color32::TRANSPARENT {
-        ui.painter().rect_filled(rect, 8.0, bg);
-    }
-    if active {
-        let bar = egui::Rect::from_min_size(rect.left_top(), Vec2::new(3.0, rect.height()));
-        ui.painter().rect_filled(bar, 2.0, accent());
-    }
+        let bg = if active {
+            accent_soft()
+        } else if response.hovered() {
+            card_hover()
+        } else {
+            Color32::TRANSPARENT
+        };
+        if bg != Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, 8.0, bg);
+        }
+        if active {
+            let bar = egui::Rect::from_min_size(rect.left_top(), Vec2::new(3.0, rect.height()));
+            ui.painter().rect_filled(bar, 2.0, accent());
+        }
 
-    let text_color = if active { text() } else { text_muted() };
-    let pos = rect.left_center() + Vec2::new(14.0, 0.0);
-    ui.painter().text(
-        pos,
-        egui::Align2::LEFT_CENTER,
-        format!("{icon}  {label}"),
-        egui::FontId::proportional(14.0),
-        text_color,
-    );
+        let text_color = if active { text() } else { text_muted() };
+        let pos = rect.left_center() + Vec2::new(14.0, 0.0);
+        ui.painter().text(
+            pos,
+            egui::Align2::LEFT_CENTER,
+            format!("{icon}  {label}"),
+            egui::FontId::proportional(14.0),
+            text_color,
+        );
 
-    response.clicked()
+        response.clicked()
+    })
+    .inner
 }
 
 pub fn primary_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {

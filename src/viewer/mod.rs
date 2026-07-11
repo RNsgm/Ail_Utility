@@ -1,4 +1,5 @@
 mod app;
+mod audio_player;
 mod converter_view;
 mod encoder_view;
 mod gallery;

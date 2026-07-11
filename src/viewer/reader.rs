@@ -66,6 +66,7 @@ pub struct ReaderView {
     gif_last_frame_time: std::time::Instant,
     gif_looping: bool,
     video_player: Option<VideoPlayer>,
+    video_scrub_time: Option<f64>,
     current_media_type: MediaType,
     entry_names: Vec<String>,
 }
@@ -91,6 +92,7 @@ impl ReaderView {
             gif_last_frame_time: std::time::Instant::now(),
             gif_looping: true,
             video_player: None,
+            video_scrub_time: None,
             current_media_type: MediaType::Image,
             entry_names: Vec::new(),
         }
@@ -289,6 +291,7 @@ impl ReaderView {
 
     fn clear_media_state(&mut self) {
         self.video_player = None;
+        self.video_scrub_time = None;
         self.gif_frames = None;
         self.gif_current_frame = 0;
     }
@@ -366,6 +369,8 @@ impl ReaderView {
             .unwrap_or("Unknown")
             .to_string();
 
+        let showing_video = self.is_showing_video();
+
         if self.show_ui {
             egui::Panel::top("reader_top")
                 .frame(toolbar_frame())
@@ -423,37 +428,45 @@ impl ReaderView {
                     });
                 });
 
-            egui::Panel::bottom("reader_bottom")
-                .frame(toolbar_frame())
-                .show_inside(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Страница:");
-                        let mut page = self.current_page + 1;
-                        if ui
-                            .add(egui::DragValue::new(&mut page).range(1..=total_pages))
-                            .changed()
-                        {
-                            self.go_to_page(page.saturating_sub(1));
-                        }
-                        ui.label(format!("/ {total_pages}"));
-
-                        ui.add_space(20.0);
-                        let mut progress = self.current_page as f32;
-                        if ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut progress,
-                                    0.0..=(total_pages.saturating_sub(1)) as f32,
-                                )
-                                .show_value(false)
-                                .trailing_fill(true),
-                            )
-                            .changed()
-                        {
-                            self.go_to_page(progress as usize);
-                        }
+            if showing_video {
+                egui::Panel::bottom("video_controls")
+                    .frame(toolbar_frame())
+                    .show_inside(ui, |ui| {
+                        self.render_video_controls(ctx, ui);
                     });
-                });
+            } else {
+                egui::Panel::bottom("reader_bottom")
+                    .frame(toolbar_frame())
+                    .show_inside(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Страница:");
+                            let mut page = self.current_page + 1;
+                            if ui
+                                .add(egui::DragValue::new(&mut page).range(1..=total_pages))
+                                .changed()
+                            {
+                                self.go_to_page(page.saturating_sub(1));
+                            }
+                            ui.label(format!("/ {total_pages}"));
+
+                            ui.add_space(20.0);
+                            let mut progress = self.current_page as f32;
+                            if ui
+                                .add(
+                                    egui::Slider::new(
+                                        &mut progress,
+                                        0.0..=(total_pages.saturating_sub(1)) as f32,
+                                    )
+                                    .show_value(false)
+                                    .trailing_fill(true),
+                                )
+                                .changed()
+                            {
+                                self.go_to_page(progress as usize);
+                            }
+                        });
+                    });
+            }
         }
 
         let current_page = self.current_page;
@@ -600,6 +613,107 @@ impl ReaderView {
         });
     }
 
+    fn is_showing_video(&self) -> bool {
+        if self.video_player.is_some() {
+            return true;
+        }
+        if self.current_page < self.entry_names.len() {
+            return MediaType::from_path(&self.entry_names[self.current_page]).is_video();
+        }
+        false
+    }
+
+    fn render_video_controls(&mut self, ctx: &Context, ui: &mut Ui) {
+        let Some(player) = self.video_player.as_mut() else {
+            ui.label(RichText::new("Загрузка видео…").color(theme::text_muted()));
+            return;
+        };
+
+        let elapsed = player.elapsed().clamp(0.0, player.duration);
+        let mut seek_target = None;
+        let mut volume = player.volume;
+
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(theme::CONTENT_PAD);
+
+                if ui
+                    .button(if player.is_paused { "▶" } else { "⏸" })
+                    .clicked()
+                {
+                    player.toggle_pause();
+                }
+
+                if ui
+                    .button(if player.looping { "🔁" } else { "➡" })
+                    .on_hover_text("Повтор")
+                    .clicked()
+                {
+                    player.looping = !player.looping;
+                }
+
+                ui.label(
+                    RichText::new(format!(
+                        "{} / {}",
+                        fmt_time(elapsed),
+                        fmt_time(player.duration)
+                    ))
+                    .monospace()
+                    .color(theme::text_muted()),
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(theme::CONTENT_PAD);
+
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut volume, 0.0..=1.0)
+                                .show_value(false)
+                                .trailing_fill(true),
+                        )
+                        .changed()
+                    {
+                        player.set_volume(volume);
+                    }
+
+                    ui.label(RichText::new("🔊").color(theme::text_muted()));
+                });
+            });
+
+            ui.horizontal(|ui| {
+                ui.add_space(theme::CONTENT_PAD);
+
+                let mut slider_val = self.video_scrub_time.unwrap_or(elapsed);
+                let seek_width = ui.available_width() - theme::CONTENT_PAD;
+                let resp = ui.add_sized(
+                    [seek_width.max(100.0), 20.0],
+                    egui::Slider::new(&mut slider_val, 0.0..=player.duration.max(0.001))
+                        .show_value(false)
+                        .trailing_fill(true),
+                );
+
+                if resp.is_pointer_button_down_on() {
+                    self.video_scrub_time = Some(slider_val);
+                } else {
+                    self.video_scrub_time = None;
+                }
+
+                if resp.drag_stopped() {
+                    seek_target = Some(slider_val);
+                } else if resp.changed() && !resp.dragged() {
+                    seek_target = Some(slider_val);
+                }
+
+                ui.add_space(theme::CONTENT_PAD);
+            });
+        });
+
+        if let Some(target) = seek_target {
+            self.video_scrub_time = None;
+            player.seek_to(ctx, target);
+        }
+    }
+
     fn render_video(&mut self, ctx: &Context, ui: &mut Ui, mode: ReaderMode, zoom_level: f32) {
         let Some(ref mut player) = self.video_player else {
             ui.centered_and_justified(|ui| {
@@ -620,24 +734,22 @@ impl ReaderView {
 
         let img_size = tex.size_vec2();
         let available_size = ui.available_size();
-        let controls_height = 40.0;
-        let video_height = available_size.y - controls_height;
 
         let display_scale = match mode {
             ReaderMode::FitWindow => {
                 let ratio_x = available_size.x / img_size.x;
-                let ratio_y = video_height / img_size.y;
+                let ratio_y = available_size.y / img_size.y;
                 ratio_x.min(ratio_y).min(1.0)
             }
             ReaderMode::FitWidth => (available_size.x / img_size.x).min(1.0),
-            ReaderMode::FitHeight => (video_height / img_size.y).min(1.0),
+            ReaderMode::FitHeight => (available_size.y / img_size.y).min(1.0),
             ReaderMode::Original => 1.0,
             ReaderMode::Zoom(z) => z,
         } * zoom_level;
 
         let final_size = img_size * display_scale;
         let x_offset = (available_size.x - final_size.x).max(0.0) / 2.0;
-        let y_offset = (video_height - final_size.y).max(0.0) / 2.0;
+        let y_offset = (available_size.y - final_size.y).max(0.0) / 2.0;
 
         ui.vertical(|ui| {
             ui.add_space(y_offset);
@@ -646,65 +758,6 @@ impl ReaderView {
                 ui.add(egui::Image::new(tex).max_size(final_size));
             });
         });
-
-        // Controls
-        let elapsed = player.elapsed().clamp(0.0, player.duration);
-        let mut seek_target = None;
-        let mut scrub_time = elapsed;
-
-        media_bar_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .button(if player.is_paused { "▶" } else { "⏸" })
-                    .clicked()
-                {
-                    player.toggle_pause();
-                }
-
-                if ui
-                    .button(if player.looping { "🔁" } else { "➡" })
-                    .on_hover_text("Повтор")
-                    .clicked()
-                {
-                    player.looping = !player.looping;
-                }
-
-                let slider_width = ui.available_width() - 20.0;
-                let mut slider_val = elapsed;
-                let resp = ui.add_sized(
-                    [slider_width.max(50.0), 20.0],
-                    egui::Slider::new(&mut slider_val, 0.0..=player.duration.max(0.001))
-                        .show_value(false)
-                        .trailing_fill(true),
-                );
-
-                if resp.dragged() {
-                    scrub_time = slider_val;
-                } else {
-                    scrub_time = elapsed;
-                }
-
-                if resp.drag_stopped() {
-                    seek_target = Some(slider_val);
-                } else if resp.changed() && !resp.dragged() {
-                    seek_target = Some(slider_val);
-                }
-
-                ui.label(
-                    RichText::new(format!(
-                        "{} / {}",
-                        fmt_time(scrub_time),
-                        fmt_time(player.duration)
-                    ))
-                    .monospace()
-                    .color(theme::text_muted()),
-                );
-            });
-        });
-
-        if let Some(target) = seek_target {
-            player.seek_to(ctx, target);
-        }
     }
 
     fn render_image(&mut self, ui: &mut Ui, page: usize, mode: ReaderMode, zoom_level: f32) {

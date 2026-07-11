@@ -24,6 +24,7 @@ egui = { version = "0.34.2", optional = true }
 eframe = { version = "0.34.2", default-features = false, optional = true, features = ["glow", "default_fonts"] }
 image = { version = "0.25", features = ["jpeg", "png", "webp", "gif", "bmp"] }
 ffmpeg-next = { git = "https://github.com/zmwangx/rust-ffmpeg", branch = "master", optional = true, features = ["format"] }
+cpal = { version = "0.15", optional = true }
 aes-gcm = "0.10.3"
 rand = "0.10.1"
 sevenz-rust = "0.6.1"
@@ -31,7 +32,7 @@ sevenz-rust = "0.6.1"
 [features]
 default = ["gui", "unrar", "ffmpeg"]
 gui = ["dep:egui", "dep:eframe", "dep:rfd"]
-ffmpeg = ["dep:ffmpeg-next"]
+ffmpeg = ["dep:ffmpeg-next", "dep:cpal"]
 unrar = ["dep:unrar"]
 
 [dev-dependencies]

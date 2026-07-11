@@ -1,5 +1,6 @@
+use crate::viewer::audio_player::AudioPlayer;
 use crate::viewer::thread_util::spawn_worker;
-use crate::{log_error, log_info, log_warn};
+use crate::{log_error, log_info};
 use egui::{Context, TextureHandle, TextureOptions};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,14 +14,16 @@ pub struct VideoPlayer {
     receiver: Receiver<(egui::ColorImage, f64)>,
     current_texture: Option<TextureHandle>,
     next_frame: Option<(egui::ColorImage, f64)>,
-    base_time: Instant,
-    total_pause: Duration,
-    paused_at: Option<Instant>,
+    playback_pts: f64,
+    playback_origin: Instant,
     pub is_paused: bool,
     temp_path: PathBuf,
     pub duration: f64,
     pub looping: bool,
+    pub volume: f32,
     decode_cancel: Option<Arc<AtomicBool>>,
+    need_seek_frame: bool,
+    audio: Option<AudioPlayer>,
 }
 
 impl VideoPlayer {
@@ -32,6 +35,7 @@ impl VideoPlayer {
         );
         let duration = probe_duration(&temp_path);
         log_info!("VideoPlayer: probed duration={duration:.3}s");
+
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(FRAME_BUFFER);
         let cancel = Arc::new(AtomicBool::new(false));
         let path = temp_path.clone();
@@ -41,18 +45,22 @@ impl VideoPlayer {
             decode_video_frames(&path, frame_tx, 0.0, cancel_worker);
         });
 
+        let audio = AudioPlayer::start(temp_path.clone(), 0.0);
+
         let player = Self {
             receiver: frame_rx,
             current_texture: None,
             next_frame: None,
-            base_time: Instant::now(),
-            total_pause: Duration::ZERO,
-            paused_at: None,
+            playback_pts: 0.0,
+            playback_origin: Instant::now(),
             is_paused: false,
             temp_path,
             duration,
             looping: false,
+            volume: 1.0,
             decode_cancel: Some(cancel),
+            need_seek_frame: true,
+            audio,
         };
 
         ctx.request_repaint();
@@ -60,40 +68,45 @@ impl VideoPlayer {
     }
 
     pub fn update(&mut self, ctx: &Context) -> Option<&TextureHandle> {
-        if self.is_paused {
-            return self.current_texture.as_ref();
-        }
-
-        let mut elapsed = self.elapsed();
-
-        if self.looping && self.duration > 0.0 && elapsed >= self.duration {
-            self.seek_to(ctx, 0.0);
-            elapsed = 0.0;
-        }
-
-        if let Some((ref image, pts)) = self.next_frame {
-            if pts <= elapsed {
-                let texture =
-                    ctx.load_texture("video_frame", image.clone(), TextureOptions::LINEAR);
-                self.current_texture = Some(texture);
-                self.next_frame = None;
+        if self.need_seek_frame {
+            if let Ok((image, pts)) = self.receiver.try_recv() {
+                self.show_frame(ctx, image, pts);
+                self.need_seek_frame = false;
+            } else {
+                ctx.request_repaint();
+                return self.current_texture.as_ref();
             }
         }
 
-        while self.next_frame.is_none() {
-            match self.receiver.try_recv() {
-                Ok((image, pts)) => {
-                    if pts <= elapsed {
-                        let texture =
-                            ctx.load_texture("video_frame", image, TextureOptions::LINEAR);
-                        self.current_texture = Some(texture);
-                    } else {
-                        self.next_frame = Some((image, pts));
-                        break;
-                    }
+        if !self.is_paused {
+            if self.looping && self.duration > 0.0 && self.playback_clock() >= self.duration {
+                self.seek_to(ctx, 0.0);
+            }
+
+            let clock = self.playback_clock();
+
+            if let Some((ref image, pts)) = self.next_frame {
+                if pts <= clock + 0.05 {
+                    let image = image.clone();
+                    let pts = *pts;
+                    self.next_frame = None;
+                    self.show_frame(ctx, image, pts);
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
+            }
+
+            while self.next_frame.is_none() {
+                match self.receiver.try_recv() {
+                    Ok((image, pts)) => {
+                        if pts <= clock + 0.05 {
+                            self.show_frame(ctx, image, pts);
+                        } else {
+                            self.next_frame = Some((image, pts));
+                            break;
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break,
+                }
             }
         }
 
@@ -101,16 +114,30 @@ impl VideoPlayer {
         self.current_texture.as_ref()
     }
 
+    fn show_frame(&mut self, ctx: &Context, image: egui::ColorImage, pts: f64) {
+        let texture = ctx.load_texture(
+            format!("video_frame_{}", pts.to_bits()),
+            image,
+            TextureOptions::LINEAR,
+        );
+        self.current_texture = Some(texture);
+        self.playback_pts = pts;
+        self.playback_origin = Instant::now();
+    }
+
     pub fn toggle_pause(&mut self) {
         if self.is_paused {
-            if let Some(paused) = self.paused_at {
-                self.total_pause += Instant::now().duration_since(paused);
-                self.paused_at = None;
-            }
             self.is_paused = false;
+            self.playback_origin = Instant::now();
+            if let Some(audio) = &self.audio {
+                audio.resume();
+            }
         } else {
-            self.paused_at = Some(Instant::now());
+            self.playback_pts = self.playback_clock();
             self.is_paused = true;
+            if let Some(audio) = &self.audio {
+                audio.pause();
+            }
         }
     }
 
@@ -118,19 +145,28 @@ impl VideoPlayer {
         !self.is_paused
     }
 
-    pub fn elapsed(&self) -> f64 {
-        let now = Instant::now();
-        let current_pause = if let Some(paused) = self.paused_at {
-            now.duration_since(paused)
+    pub fn playback_clock(&self) -> f64 {
+        if self.is_paused {
+            self.playback_pts
         } else {
-            Duration::ZERO
-        };
-        let total = self.total_pause + current_pause;
-        now.duration_since(self.base_time).as_secs_f64() - total.as_secs_f64()
+            self.playback_pts + self.playback_origin.elapsed().as_secs_f64()
+        }
+    }
+
+    pub fn elapsed(&self) -> f64 {
+        self.playback_clock()
+    }
+
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        if let Some(audio) = &self.audio {
+            audio.set_volume(self.volume);
+        }
     }
 
     pub fn seek_to(&mut self, ctx: &Context, target: f64) {
         let target = target.clamp(0.0, self.duration.max(0.0));
+        let was_paused = self.is_paused;
         log_info!(
             "VideoPlayer::seek_to {target:.3}s file={}",
             self.temp_path.display()
@@ -151,10 +187,21 @@ impl VideoPlayer {
         self.receiver = frame_rx;
         self.decode_cancel = Some(cancel);
         self.next_frame = None;
-        self.base_time = Instant::now() - Duration::from_secs_f64(target);
-        self.total_pause = Duration::ZERO;
-        self.paused_at = None;
-        self.is_paused = false;
+        self.current_texture = None;
+        self.playback_pts = target;
+        self.playback_origin = Instant::now();
+        self.is_paused = was_paused;
+        self.need_seek_frame = true;
+
+        if let Some(audio) = &mut self.audio {
+            audio.restart(self.temp_path.clone(), target);
+            audio.set_volume(self.volume);
+            if was_paused {
+                audio.pause();
+            } else {
+                audio.resume();
+            }
+        }
 
         ctx.request_repaint();
     }
@@ -174,6 +221,7 @@ impl Drop for VideoPlayer {
     fn drop(&mut self) {
         self.stop_decode_worker();
         self.drain_receiver();
+        self.audio = None;
         log_info!("VideoPlayer::drop removing {}", self.temp_path.display());
         let _ = std::fs::remove_file(&self.temp_path);
     }
@@ -187,6 +235,19 @@ struct VideoDecoderState {
     scaler: ffmpeg_next::software::scaling::Context,
     time_base: ffmpeg_next::util::rational::Rational,
     start_time: f64,
+    fps: f64,
+    frames_emitted: u64,
+    waiting_keyframe: bool,
+}
+
+#[cfg(feature = "ffmpeg")]
+fn ts_to_seconds(ts: i64, time_base: ffmpeg_next::util::rational::Rational) -> f64 {
+    ts as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator())
+}
+
+#[cfg(feature = "ffmpeg")]
+fn seconds_to_av_time(seconds: f64) -> i64 {
+    (seconds * 1_000_000.0).round() as i64
 }
 
 #[cfg(feature = "ffmpeg")]
@@ -202,30 +263,35 @@ impl VideoDecoderState {
             .ok_or_else(|| "No video stream".to_string())?
             .index();
 
-        if start_time > 0.0 {
-            let tb = input
-                .stream(stream_index)
-                .ok_or_else(|| "Missing video stream".to_string())?
-                .time_base();
-            let ts =
-                (start_time * f64::from(tb.denominator()) / f64::from(tb.numerator())) as i64;
-            log_info!("VideoDecoderState::open seek ts={ts}");
-            input
-                .seek(ts, ..)
-                .map_err(|e| format!("seek failed: {e}"))?;
-        }
-
         let stream = input
             .stream(stream_index)
             .ok_or_else(|| "Missing video stream".to_string())?;
         let time_base = stream.time_base();
+        let avg_rate = stream.avg_frame_rate();
+        let fps = if avg_rate.denominator() > 0 {
+            avg_rate.numerator() as f64 / avg_rate.denominator() as f64
+        } else {
+            30.0
+        }
+        .max(1.0);
+
         let decoder_params = stream.parameters();
-        let decoder = codec::context::Context::from_parameters(decoder_params)
+        let mut decoder = codec::context::Context::from_parameters(decoder_params)
             .map_err(|e| e.to_string())?;
-        let decoder = decoder.decoder().video().map_err(|e| e.to_string())?;
+        let mut decoder = decoder.decoder().video().map_err(|e| e.to_string())?;
+
+        let waiting_keyframe = start_time > 0.0;
+        if waiting_keyframe {
+            let ts = seconds_to_av_time(start_time);
+            log_info!("VideoDecoderState::open seek ts={ts} ({start_time:.3}s)");
+            input
+                .seek(ts, ..ts)
+                .map_err(|e| format!("seek failed: {e}"))?;
+            decoder.flush();
+        }
 
         log_info!(
-            "VideoDecoderState::open stream #{stream_index} {}x{}",
+            "VideoDecoderState::open stream #{stream_index} {}x{} fps={fps:.3}",
             decoder.width(),
             decoder.height()
         );
@@ -248,6 +314,9 @@ impl VideoDecoderState {
             scaler,
             time_base,
             start_time,
+            fps,
+            frames_emitted: 0,
+            waiting_keyframe,
         })
     }
 
@@ -259,21 +328,32 @@ impl VideoDecoderState {
                 continue;
             }
 
+            let packet_pts = packet.pts().map(|ts| ts_to_seconds(ts, self.time_base));
+
             if self.decoder.send_packet(&packet).is_err() {
                 continue;
             }
 
             let mut decoded = frame::Video::empty();
             while self.decoder.receive_frame(&mut decoded).is_ok() {
-                let pts = decoded
-                    .timestamp()
-                    .map(|ts| {
-                        ts as f64 * f64::from(self.time_base.numerator())
-                            / f64::from(self.time_base.denominator())
-                    })
-                    .unwrap_or(0.0);
+                if self.waiting_keyframe {
+                    if !decoded.is_key() {
+                        continue;
+                    }
+                    self.waiting_keyframe = false;
+                }
 
-                if pts + 0.001 < self.start_time {
+                let frame_pts = decoded
+                    .timestamp()
+                    .map(|ts| ts_to_seconds(ts, self.time_base))
+                    .or(packet_pts);
+
+                let pts = frame_pts.unwrap_or_else(|| {
+                    self.start_time + self.frames_emitted as f64 / self.fps
+                });
+                self.frames_emitted += 1;
+
+                if pts + 0.05 < self.start_time {
                     continue;
                 }
 
@@ -383,7 +463,6 @@ fn decode_video_frames(
 
             loop {
                 if cancel.load(Ordering::Relaxed) {
-                    log_info!("decode_video_frames: cancelled while sending");
                     return;
                 }
 

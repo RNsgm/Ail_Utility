@@ -68,30 +68,39 @@ impl VideoPlayer {
 
     pub fn update(&mut self, ctx: &Context) -> Option<&TextureHandle> {
         let now = self.clock.now();
-        let mut store = self.store.lock();
-        store.trim_before(now);
+        let mut seek_to_start = false;
 
-        if self.awaiting_seek_frame {
-            if let Some(frame) = store.take_first() {
-                drop(store);
-                self.display_frame(ctx, frame);
-                self.awaiting_seek_frame = false;
-                self.stream_ended = false;
-            } else if store.is_eof() {
-                self.awaiting_seek_frame = false;
-            } else {
-                drop(store);
-                ctx.request_repaint();
-                return self.presenter.texture();
+        {
+            let mut store = self.store.lock();
+            store.trim_before(now);
+
+            if self.awaiting_seek_frame {
+                if let Some(frame) = store.take_first() {
+                    drop(store);
+                    self.display_frame(ctx, frame);
+                    self.awaiting_seek_frame = false;
+                    self.stream_ended = false;
+                } else if store.is_eof() {
+                    self.awaiting_seek_frame = false;
+                } else {
+                    drop(store);
+                    ctx.request_repaint();
+                    return self.presenter.texture();
+                }
+            } else if !self.clock.is_paused() && !self.stream_ended {
+                if self.looping && self.clock.reached_end() {
+                    seek_to_start = true;
+                } else if let Some(frame) = store.pop_due(now, self.displayed_pts) {
+                    drop(store);
+                    self.display_frame(ctx, frame);
+                }
             }
-        } else if !self.clock.is_paused() && !self.stream_ended {
-            if self.looping && self.clock.reached_end() {
-                drop(store);
-                self.seek_to(ctx, 0.0);
-            } else if let Some(frame) = store.pop_due(now, self.displayed_pts) {
-                drop(store);
-                self.display_frame(ctx, frame);
-            }
+        }
+
+        if seek_to_start {
+            self.seek_to(ctx, 0.0);
+            self.schedule_repaint(ctx);
+            return self.presenter.texture();
         }
 
         let ended = {

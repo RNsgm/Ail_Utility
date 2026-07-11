@@ -1,4 +1,4 @@
-use crate::encoder::{encode_media_to_ail, CompressionType, EncodeOptions};
+use crate::encoder::{collect_encoding_jobs, encode_media_to_ail, CompressionType, EncodeOptions};
 use egui::{Color32, Context, RichText, Ui};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -44,6 +44,10 @@ impl EncoderView {
 
         ui.vertical(|ui| {
             ui.heading("Кодировщик в .ail");
+            ui.label(
+                RichText::new("Каждый архив (zip/rar/7z) кодируется в отдельный .ail")
+                    .color(Color32::GRAY),
+            );
             ui.add_space(10.0);
 
             ui.group(|ui| {
@@ -65,7 +69,13 @@ impl EncoderView {
                 });
 
                 let (files, folders) = self.count_inputs();
-                ui.label(format!("Выбрано: {} файлов, {} папок", files, folders));
+                let jobs = collect_encoding_jobs(&self.input_paths, self.output_dir.as_deref());
+                ui.label(format!(
+                    "Источников: {} файлов, {} папок → {} заданий .ail",
+                    files,
+                    folders,
+                    jobs.len()
+                ));
 
                 if !self.input_paths.is_empty() {
                     egui::ScrollArea::vertical()
@@ -132,7 +142,7 @@ impl EncoderView {
 
             if self.is_encoding {
                 ui.add(
-                    egui::ProgressBar::new(self.progress.0 as f32 / self.progress.1 as f32)
+                    egui::ProgressBar::new(self.progress.0 as f32 / self.progress.1.max(1) as f32)
                         .text(format!("Обработка {}/{}", self.progress.0, self.progress.1)),
                 );
                 ui.label(format!("Текущий: {}", self.current_file));
@@ -182,59 +192,43 @@ impl EncoderView {
     }
 
     fn start_encoding(&mut self, ctx: &Context) {
+        let jobs = collect_encoding_jobs(&self.input_paths, self.output_dir.as_deref());
+        if jobs.is_empty() {
+            self.logs
+                .push(("⚠ Нет заданий для кодирования".to_string(), true));
+            return;
+        }
+
         self.is_encoding = true;
-        self.progress = (0, self.input_paths.len());
+        self.progress = (0, jobs.len());
         self.logs.clear();
 
         let (tx, rx) = channel();
         self.receiver = Some(rx);
 
-        let paths = self.input_paths.clone();
         let options = self.options.clone();
-        let output_dir = self.output_dir.clone();
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let total = paths.len();
-            for (i, path) in paths.into_iter().enumerate() {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
+            let total = jobs.len();
+            for (i, job) in jobs.into_iter().enumerate() {
                 let _ = tx.send(EncodeMessage::Progress {
                     current: i + 1,
                     total,
-                    name: name.clone(),
+                    name: job.label.clone(),
                 });
                 ctx.request_repaint();
 
-                let out_path = if let Some(ref dir) = output_dir {
-                    dir.join(format!(
-                        "{}.ail",
-                        path.file_stem()
-                            .map(|s| s.to_string_lossy())
-                            .unwrap_or_else(|| path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy())
-                    ))
-                } else if path.is_dir() {
-                    path.join(format!(
-                        "{}.ail",
-                        path.file_name()
-                            .map(|s| s.to_string_lossy())
-                            .unwrap_or_default()
-                    ))
-                } else {
-                    path.with_extension("ail")
-                };
-
-                match encode_media_to_ail(&path, &out_path, Some(options.clone())) {
+                match encode_media_to_ail(&job.input, &job.output, Some(options.clone())) {
                     Ok(_) => {
-                        let _ = tx.send(EncodeMessage::Success(name));
+                        let _ = tx.send(EncodeMessage::Success(format!(
+                            "{} → {}",
+                            job.label,
+                            job.output.display()
+                        )));
                     }
                     Err(e) => {
-                        let _ = tx.send(EncodeMessage::Error(name, e.to_string()));
+                        let _ = tx.send(EncodeMessage::Error(job.label, e.to_string()));
                     }
                 }
                 ctx.request_repaint();

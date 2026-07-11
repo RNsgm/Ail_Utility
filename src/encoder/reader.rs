@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 #[cfg(feature = "ffmpeg")]
-use crate::encoder::video_convert::{convert_to_mp4, needs_mp4_conversion};
+use crate::encoder::video_convert::{convert_to_mp4, is_tts_file, mp4_output_path};
 use crate::encoder::{
     is_media_file, AilBuilder, ArchiveType, CompressionType, EncoderError, MediaType,
 };
@@ -501,7 +501,7 @@ fn encode_video_file_to_ail(
     output_path: &Path,
     options: &EncodeOptions,
 ) -> Result<(), EncoderError> {
-    let converted_path = if needs_mp4_conversion(input_path) {
+    let converted_path = if is_tts_file(input_path) {
         let temp = std::env::temp_dir().join(format!(
             "ail_convert_{}_{}.mp4",
             std::process::id(),
@@ -517,8 +517,7 @@ fn encode_video_file_to_ail(
 
     let data = std::fs::read(video_path)?;
     let name = if converted_path.is_some() {
-        input_path
-            .with_extension("mp4")
+        mp4_output_path(input_path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("video.mp4")
@@ -578,7 +577,7 @@ pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 
     #[cfg(feature = "ffmpeg")]
-    if MediaType::from_path(input_path).is_video() || needs_mp4_conversion(input_path) {
+    if MediaType::from_path(input_path).is_video() || is_tts_file(input_path) {
         return encode_video_file_to_ail(input_path, output_path.as_ref(), &options);
     }
 

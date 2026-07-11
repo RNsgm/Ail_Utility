@@ -42,10 +42,12 @@ impl ConverterView {
         self.process_messages();
 
         ui.vertical(|ui| {
-            ui.heading("Конвертер TS → MP4");
+            ui.heading("Конвертер TTS → MP4");
             ui.label(
-                RichText::new("Автоопределение MPEG-TS по расширению (.ts, .mts, .m2ts) и формату файла")
-                    .color(Color32::GRAY),
+                RichText::new(
+                    "Файлы .tts и .mp4.tts: автоопределение и конвертация в обычный MP4",
+                )
+                .color(Color32::GRAY),
             );
             ui.add_space(10.0);
 
@@ -62,7 +64,7 @@ impl ConverterView {
                             self.add_paths([folder]);
                         }
                     }
-                    if ui.button("🔍 Найти TS").clicked() {
+                    if ui.button("🔍 Найти TTS").clicked() {
                         self.scan_for_convertible();
                     }
                     if ui.button("🗑 Очистить").clicked() {
@@ -84,7 +86,7 @@ impl ConverterView {
                             for path in &self.input_paths {
                                 let icon = if path.is_dir() { "📁" } else { "📄" };
                                 let tag = if path.is_file() && needs_mp4_conversion(path) {
-                                    " [TS]"
+                                    " [TTS]"
                                 } else if path.is_file() {
                                     ""
                                 } else {

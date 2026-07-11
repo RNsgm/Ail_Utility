@@ -117,6 +117,15 @@ pub fn apply(ctx: &Context) {
     ctx.set_global_style(style);
 }
 
+/// Временно задаёт ширину слайдера (egui по умолчанию 160px).
+pub fn with_slider_width<R>(ui: &mut Ui, width: f32, add_slider: impl FnOnce(&mut Ui) -> R) -> R {
+    let prev = ui.spacing().slider_width;
+    ui.spacing_mut().slider_width = width.max(48.0);
+    let result = add_slider(ui);
+    ui.spacing_mut().slider_width = prev;
+    result
+}
+
 pub fn card_frame() -> Frame {
     Frame::new()
         .fill(card())

@@ -23,6 +23,8 @@ pub struct VideoPlayer {
     pub volume: f32,
     decode_cancel: Option<Arc<AtomicBool>>,
     need_seek_frame: bool,
+    decode_finished: bool,
+    frame_seq: u64,
     audio: Option<AudioPlayer>,
 }
 
@@ -60,6 +62,8 @@ impl VideoPlayer {
             volume: 1.0,
             decode_cancel: Some(cancel),
             need_seek_frame: true,
+            decode_finished: false,
+            frame_seq: 0,
             audio,
         };
 
@@ -70,32 +74,51 @@ impl VideoPlayer {
     pub fn update(&mut self, ctx: &Context) -> Option<&TextureHandle> {
         if self.need_seek_frame {
             if let Ok((image, pts)) = self.receiver.try_recv() {
+                self.playback_pts = pts;
+                self.playback_origin = Instant::now();
                 self.show_frame(ctx, image, pts);
                 self.need_seek_frame = false;
+                self.decode_finished = false;
             } else {
                 ctx.request_repaint();
                 return self.current_texture.as_ref();
             }
         }
 
-        if !self.is_paused {
+        if !self.is_paused && !self.decode_finished {
             if self.looping && self.duration > 0.0 && self.playback_clock() >= self.duration {
                 self.seek_to(ctx, 0.0);
+            } else {
+                self.try_show_due_frame(ctx);
             }
-
-            self.try_show_due_frame(ctx);
         }
 
         if !self.is_paused {
             if let Some((_, next_pts)) = &self.next_frame {
                 let wait = (*next_pts - self.playback_clock()).max(0.0);
                 ctx.request_repaint_after(Duration::from_secs_f64(wait.min(0.25)));
+            } else if self.decode_finished {
+                self.handle_end_of_stream(ctx);
             } else {
                 ctx.request_repaint();
             }
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
 
         self.current_texture.as_ref()
+    }
+
+    fn handle_end_of_stream(&mut self, ctx: &Context) {
+        if self.looping && self.duration > 0.0 {
+            self.seek_to(ctx, 0.0);
+            return;
+        }
+        self.playback_pts = self.duration.min(self.playback_clock());
+        self.is_paused = true;
+        if let Some(audio) = &self.audio {
+            audio.pause();
+        }
     }
 
     fn try_show_due_frame(&mut self, ctx: &Context) {
@@ -110,18 +133,26 @@ impl VideoPlayer {
             return;
         }
 
-        if let Ok((image, pts)) = self.receiver.try_recv() {
-            if pts <= clock + 0.001 {
-                self.show_frame(ctx, image, pts);
-            } else {
-                self.next_frame = Some((image, pts));
+        match self.receiver.try_recv() {
+            Ok((image, pts)) => {
+                if pts <= clock + 0.001 {
+                    self.show_frame(ctx, image, pts);
+                } else {
+                    self.next_frame = Some((image, pts));
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.decode_finished = true;
             }
         }
     }
 
-    fn show_frame(&mut self, ctx: &Context, image: egui::ColorImage, pts: f64) {
+    fn show_frame(&mut self, ctx: &Context, image: egui::ColorImage, _pts: f64) {
+        let seq = self.frame_seq;
+        self.frame_seq = self.frame_seq.wrapping_add(1);
         let texture = ctx.load_texture(
-            format!("video_frame_{}", pts.to_bits()),
+            format!("video_frame_{seq}"),
             image,
             TextureOptions::LINEAR,
         );
@@ -195,6 +226,7 @@ impl VideoPlayer {
         self.playback_origin = Instant::now();
         self.is_paused = was_paused;
         self.need_seek_frame = true;
+        self.decode_finished = false;
 
         if let Some(audio) = &mut self.audio {
             audio.restart(self.temp_path.clone(), target);

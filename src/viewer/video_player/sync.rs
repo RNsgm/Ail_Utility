@@ -7,8 +7,6 @@ pub struct AvSync {
     clock: PlaybackClock,
     /// video_start - audio_start из контейнера.
     av_offset_secs: f64,
-    /// Видео показываем чуть раньше аудио-позиции (компенсация задержки вывода звука).
-    video_lead_secs: f64,
 }
 
 impl AvSync {
@@ -16,7 +14,6 @@ impl AvSync {
         Self {
             clock: PlaybackClock::new_paused(duration, 0.0),
             av_offset_secs,
-            video_lead_secs: 0.0,
         }
     }
 
@@ -59,7 +56,7 @@ impl AvSync {
 
     /// Позиция для выбора кадра видео.
     pub fn video_position(&self, audio: Option<&AudioPlayer>) -> f64 {
-        (self.master_position(audio) - self.video_lead_secs).max(0.0)
+        self.master_position(audio)
     }
 
     /// Запуск воспроизведения с заданной позиции (после буферизации).
@@ -70,7 +67,8 @@ impl AvSync {
 
     fn master_position(&self, audio: Option<&AudioPlayer>) -> f64 {
         if let Some(audio) = audio {
-            return audio.playback_time() + self.av_offset_secs;
+            // heard_time учитывает задержку cpal/WASAPI — видео не обгоняет звук.
+            return audio.heard_time() + self.av_offset_secs;
         }
         self.clock.now()
     }

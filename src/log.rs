@@ -1,4 +1,5 @@
-//! Консольный и файловый лог для отладки (в т.ч. проблемных видео на Windows).
+//! Файловый лог для отладки (в т.ч. проблемных видео на Windows).
+//! По умолчанию пишет в `ail_debug.log` рядом с exe; консольное окно не открывается.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -21,16 +22,13 @@ pub fn logging_enabled() -> bool {
     })
 }
 
-/// Инициализация: консоль (Windows) + файл `ail_debug.log` рядом с exe.
+/// Инициализация: файл `ail_debug.log` рядом с exe.
 pub fn init() {
     if !logging_enabled() {
         return;
     }
 
     let _ = START.set(Instant::now());
-
-    #[cfg(windows)]
-    init_windows_console();
 
     let log_path = std::env::current_exe()
         .ok()
@@ -67,6 +65,7 @@ pub fn write(level: &str, module: &str, message: &str) {
         .unwrap_or_else(|| "+0.000s".to_string());
     let line = format!("[{elapsed}] [{level}] [{module}] {message}");
 
+    #[cfg(debug_assertions)]
     eprintln!("{line}");
 
     if let Ok(mut guard) = LOG_FILE.lock() {
@@ -96,34 +95,4 @@ macro_rules! log_error {
     ($($arg:tt)*) => {
         $crate::log::write("ERROR", module_path!(), &format!($($arg)*))
     };
-}
-
-#[cfg(windows)]
-fn init_windows_console() {
-    use std::os::windows::io::AsRawHandle;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn AllocConsole() -> i32;
-        fn AttachConsole(pid: u32) -> i32;
-        fn SetStdHandle(n: u32, h: *mut std::ffi::c_void) -> i32;
-    }
-
-    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
-    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5u32;
-    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4u32;
-
-    unsafe {
-        let attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
-        if !attached {
-            AllocConsole();
-            // Only rewire handles for a fresh console; attaching to the parent
-            // already routes stderr and duplicating CONOUT causes double lines.
-            if let Ok(conout) = OpenOptions::new().write(true).open("CONOUT$") {
-                let handle = conout.as_raw_handle();
-                SetStdHandle(STD_OUTPUT_HANDLE, handle);
-                SetStdHandle(STD_ERROR_HANDLE, handle);
-            }
-        }
-    }
 }

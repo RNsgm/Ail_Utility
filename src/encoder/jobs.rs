@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::encoder::{is_media_file, ArchiveType};
+use crate::encoder::{is_image_file, is_video_file, ArchiveType};
 
 /// Одна задача кодирования: один вход → один `.ail`.
 #[derive(Debug, Clone)]
@@ -15,7 +15,8 @@ pub fn is_archive(path: &Path) -> bool {
 }
 
 /// Разворачивает выбранные пути в отдельные задания.
-/// Каждый архив в папке → отдельный `.ail`.
+/// Архив в папке → отдельный `.ail`; картинки в папке → один `.ail`-галерея;
+/// каждое видео в папке → свой `.ail`.
 pub fn collect_encoding_jobs(roots: &[PathBuf], output_dir: Option<&Path>) -> Vec<EncodingJob> {
     let mut jobs = Vec::new();
 
@@ -25,32 +26,38 @@ pub fn collect_encoding_jobs(roots: &[PathBuf], output_dir: Option<&Path>) -> Ve
             continue;
         }
 
-        if !root.is_dir() {
-            continue;
-        }
-
-        let mut archives = Vec::new();
-        collect_archives_recursive(root, &mut archives);
-        archives.sort();
-        archives.dedup();
-
-        if archives.is_empty() {
-            push_job(&mut jobs, root, output_dir);
-            continue;
-        }
-
-        for archive in archives {
-            push_job(&mut jobs, &archive, output_dir);
-        }
-
-        if folder_has_loose_media(root) {
-            push_job(&mut jobs, root, output_dir);
+        if root.is_dir() {
+            collect_folder_jobs(&mut jobs, root, output_dir);
         }
     }
 
     jobs.sort_by(|a, b| a.input.cmp(&b.input));
     jobs.dedup_by(|a, b| a.input == b.input && a.output == b.output);
     jobs
+}
+
+fn collect_folder_jobs(jobs: &mut Vec<EncodingJob>, dir: &Path, output_dir: Option<&Path>) {
+    let mut archives = Vec::new();
+    collect_archives_recursive(dir, &mut archives);
+    archives.sort();
+    archives.dedup();
+
+    for archive in archives {
+        push_job(jobs, &archive, output_dir);
+    }
+
+    if folder_has_loose_images(dir) {
+        push_job(jobs, dir, output_dir);
+    }
+
+    let mut videos = Vec::new();
+    collect_loose_videos(dir, &mut videos);
+    videos.sort();
+    videos.dedup();
+
+    for video in videos {
+        push_job(jobs, &video, output_dir);
+    }
 }
 
 fn push_job(jobs: &mut Vec<EncodingJob>, input: &Path, output_dir: Option<&Path>) {
@@ -106,19 +113,32 @@ fn collect_archives_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn folder_has_loose_media(dir: &Path) -> bool {
+fn folder_has_loose_images(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() && is_media_file(&path) && !is_archive(&path) {
+        if path.is_file() && is_image_file(&path) && !is_archive(&path) {
             return true;
         }
     }
 
     false
+}
+
+fn collect_loose_videos(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && is_video_file(&path) && !is_archive(&path) {
+            out.push(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -150,5 +170,40 @@ mod tests {
         let jobs = collect_encoding_jobs(&[zip], None);
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].output, dir.path().join("comic.ail"));
+    }
+
+    #[test]
+    fn folder_with_images_is_one_gallery_job() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("01.png"), b"png").unwrap();
+        fs::write(dir.path().join("02.png"), b"png").unwrap();
+
+        let jobs = collect_encoding_jobs(&[dir.path().to_path_buf()], None);
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].input.is_dir());
+    }
+
+    #[test]
+    fn folder_with_videos_produces_separate_jobs() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.mkv"), b"mkv").unwrap();
+        fs::write(dir.path().join("b.mp4"), b"mp4").unwrap();
+
+        let jobs = collect_encoding_jobs(&[dir.path().to_path_buf()], None);
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().any(|j| j.input.ends_with("a.mkv")));
+        assert!(jobs.iter().any(|j| j.input.ends_with("b.mp4")));
+    }
+
+    #[test]
+    fn folder_with_images_and_videos_splits_jobs() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("page.png"), b"png").unwrap();
+        fs::write(dir.path().join("clip.mkv"), b"mkv").unwrap();
+
+        let jobs = collect_encoding_jobs(&[dir.path().to_path_buf()], None);
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().any(|j| j.input.is_dir()));
+        assert!(jobs.iter().any(|j| j.input.ends_with("clip.mkv")));
     }
 }

@@ -4,6 +4,7 @@ mod encoder_view;
 mod gallery;
 mod reader;
 mod texture_loader;
+mod thread_util;
 mod video_player;
 
 pub use app::run_viewer;

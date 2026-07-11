@@ -1,6 +1,7 @@
 use crate::encoder::{
     collect_convertible_files, convert_to_mp4, mp4_output_path, needs_mp4_conversion,
 };
+use crate::viewer::thread_util::spawn_worker;
 use egui::{Color32, Context, RichText, Ui};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -230,7 +231,7 @@ impl ConverterView {
         let output_dir = self.output_dir.clone();
         let ctx = ctx.clone();
 
-        std::thread::spawn(move || {
+        spawn_worker("converter", move || {
             let total = files.len();
             for (i, path) in files.into_iter().enumerate() {
                 let name = path

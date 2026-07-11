@@ -352,13 +352,6 @@ fn decode_video_frames(
     const FRAME_SKIP: usize = 30;
     const MAX_FRAMES: usize = 300;
 
-    ffmpeg_next::init().map_err(|e| {
-        EncoderError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to initialize FFmpeg: {e}"),
-        ))
-    })?;
-
     let temp_path = temp_video_path("ail_encode_vid", name_hint);
     std::fs::write(&temp_path, data).map_err(|e| {
         EncoderError::Io(std::io::Error::new(
@@ -367,134 +360,148 @@ fn decode_video_frames(
         ))
     })?;
 
-    let mut ictx = format::input(&temp_path).map_err(|e| {
-        EncoderError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to open video: {}", e),
-        ))
-    })?;
+    let result = with_ffmpeg_enc(|| {
+        let mut ictx = format::input(&temp_path).map_err(|e| {
+            EncoderError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to open video: {}", e),
+            ))
+        })?;
 
-    let video_stream_index = match ictx.streams().best(ffmpeg_next::media::Type::Video) {
-        Some(stream) => stream.index(),
-        None => {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(EncoderError::NoImagesFound);
-        }
-    };
+        let video_stream_index = match ictx.streams().best(ffmpeg_next::media::Type::Video) {
+            Some(stream) => stream.index(),
+            None => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(EncoderError::NoImagesFound);
+            }
+        };
 
-    let stream = ictx.stream(video_stream_index).ok_or_else(|| {
-        let _ = std::fs::remove_file(&temp_path);
-        EncoderError::NoImagesFound
-    })?;
-
-    let fps = stream.avg_frame_rate();
-    let _ = fps;
-
-    let decoder_params = stream.parameters();
-    let decoder =
-        codec::context::Context::from_parameters(decoder_params.clone()).map_err(|_| {
+        let stream = ictx.stream(video_stream_index).ok_or_else(|| {
             let _ = std::fs::remove_file(&temp_path);
             EncoderError::NoImagesFound
         })?;
-    let mut decoder = decoder.decoder().video().map_err(|_| {
-        let _ = std::fs::remove_file(&temp_path);
-        EncoderError::NoImagesFound
-    })?;
 
-    let mut scaler = scaling::Context::get(
-        decoder.format(),
-        decoder.width(),
-        decoder.height(),
-        Pixel::RGB24,
-        decoder.width(),
-        decoder.height(),
-        scaling::Flags::BILINEAR,
-    )
-    .map_err(|_| {
-        let _ = std::fs::remove_file(&temp_path);
-        EncoderError::NoImagesFound
-    })?;
+        let fps = stream.avg_frame_rate();
+        let _ = fps;
 
-    let mut frames = Vec::new();
-    let mut frame_num = 0;
-    let mut decoded_count = 0;
+        let decoder_params = stream.parameters();
+        let decoder =
+            codec::context::Context::from_parameters(decoder_params.clone()).map_err(|_| {
+                let _ = std::fs::remove_file(&temp_path);
+                EncoderError::NoImagesFound
+            })?;
+        let mut decoder = decoder.decoder().video().map_err(|_| {
+            let _ = std::fs::remove_file(&temp_path);
+            EncoderError::NoImagesFound
+        })?;
 
-    for (_stream, packet) in ictx.packets() {
-        if _stream.index() != video_stream_index {
-            continue;
-        }
+        let mut scaler = scaling::Context::get(
+            decoder.format(),
+            decoder.width(),
+            decoder.height(),
+            Pixel::RGB24,
+            decoder.width(),
+            decoder.height(),
+            scaling::Flags::BILINEAR,
+        )
+        .map_err(|_| {
+            let _ = std::fs::remove_file(&temp_path);
+            EncoderError::NoImagesFound
+        })?;
 
-        let mut decoded = frame::Video::empty();
-        if decoder.send_packet(&packet).is_err() {
-            continue;
-        }
+        let mut frames = Vec::new();
+        let mut frame_num = 0;
+        let mut decoded_count = 0;
 
-        while decoder.receive_frame(&mut decoded).is_ok() {
-            decoded_count += 1;
-
-            if decoded_count % FRAME_SKIP != 0 {
+        for (_stream, packet) in ictx.packets() {
+            if _stream.index() != video_stream_index {
                 continue;
             }
+
+            let mut decoded = frame::Video::empty();
+            if decoder.send_packet(&packet).is_err() {
+                continue;
+            }
+
+            while decoder.receive_frame(&mut decoded).is_ok() {
+                decoded_count += 1;
+
+                if decoded_count % FRAME_SKIP != 0 {
+                    continue;
+                }
+                if frames.len() >= MAX_FRAMES {
+                    break;
+                }
+
+                let mut rgb_frame = frame::Video::empty();
+                if scaler.run(&decoded, &mut rgb_frame).is_err() {
+                    continue;
+                }
+
+                let width = decoder.width() as usize;
+                let height = decoder.height() as usize;
+                let stride = rgb_frame.stride(0) as usize;
+
+                let mut rgba_data = Vec::with_capacity(width * height * 4);
+                for y in 0..height {
+                    let offset = y * stride;
+                    for x in 0..width {
+                        let r = rgb_frame.data(0)[offset + x * 3];
+                        let g = rgb_frame.data(0)[offset + x * 3 + 1];
+                        let b = rgb_frame.data(0)[offset + x * 3 + 2];
+                        rgba_data.extend_from_slice(&[r, g, b, 255]);
+                    }
+                }
+
+                let color_image =
+                    image::RgbaImage::from_raw(width as u32, height as u32, rgba_data).ok_or_else(
+                        || {
+                            EncoderError::Io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "Failed to create image buffer",
+                            ))
+                        },
+                    )?;
+                let dynamic = image::DynamicImage::ImageRgba8(color_image);
+
+                let mut png_data = Vec::new();
+                let mut cursor = Cursor::new(&mut png_data);
+                dynamic
+                    .write_to(&mut cursor, image::ImageFormat::Png)
+                    .map_err(|e| {
+                        EncoderError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Failed to encode frame as PNG: {}", e),
+                        ))
+                    })?;
+
+                frames.push((format!("frame_{:04}.png", frame_num), png_data));
+                frame_num += 1;
+            }
+
             if frames.len() >= MAX_FRAMES {
                 break;
             }
-
-            let mut rgb_frame = frame::Video::empty();
-            if scaler.run(&decoded, &mut rgb_frame).is_err() {
-                continue;
-            }
-
-            let width = decoder.width() as usize;
-            let height = decoder.height() as usize;
-            let stride = rgb_frame.stride(0) as usize;
-
-            let mut rgba_data = Vec::with_capacity(width * height * 4);
-            for y in 0..height {
-                let offset = y * stride;
-                for x in 0..width {
-                    let r = rgb_frame.data(0)[offset + x * 3];
-                    let g = rgb_frame.data(0)[offset + x * 3 + 1];
-                    let b = rgb_frame.data(0)[offset + x * 3 + 2];
-                    rgba_data.extend_from_slice(&[r, g, b, 255]);
-                }
-            }
-
-            let color_image = image::RgbaImage::from_raw(width as u32, height as u32, rgba_data)
-                .ok_or_else(|| {
-                    EncoderError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Failed to create image buffer",
-                    ))
-                })?;
-            let dynamic = image::DynamicImage::ImageRgba8(color_image);
-
-            let mut png_data = Vec::new();
-            let mut cursor = Cursor::new(&mut png_data);
-            dynamic
-                .write_to(&mut cursor, image::ImageFormat::Png)
-                .map_err(|e| {
-                    EncoderError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Failed to encode frame as PNG: {}", e),
-                    ))
-                })?;
-
-            frames.push((format!("frame_{:04}.png", frame_num), png_data));
-            frame_num += 1;
         }
 
-        if frames.len() >= MAX_FRAMES {
-            break;
+        if frames.is_empty() {
+            return Err(EncoderError::NoImagesFound);
         }
-    }
+
+        Ok(frames)
+    });
 
     let _ = std::fs::remove_file(&temp_path);
+    result
+}
 
-    if frames.is_empty() {
-        return Err(EncoderError::NoImagesFound);
-    }
-
-    Ok(frames)
+#[cfg(feature = "ffmpeg")]
+fn with_ffmpeg_enc<F, R>(f: F) -> Result<R, EncoderError>
+where
+    F: FnOnce() -> Result<R, EncoderError>,
+{
+    crate::ffmpeg_util::with_ffmpeg(|| f().map_err(|e| e.to_string()))
+        .map_err(|e| EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
 }
 
 #[cfg(feature = "ffmpeg")]

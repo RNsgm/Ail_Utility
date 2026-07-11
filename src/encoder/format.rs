@@ -253,14 +253,6 @@ impl AilThumbnail {
         use ffmpeg_next::software::scaling;
         use ffmpeg_next::util::format::Pixel;
 
-        ffmpeg_next::init().map_err(|e| {
-            EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to initialize FFmpeg: {}", e),
-            ))
-        })?;
-
-        // Записываем во временный файл с корректным расширением (mkv, mp4, …)
         let hint = name_hint.unwrap_or("video.mp4");
         let temp_path = crate::encoder::temp_video_path("ail_video_thumb", hint);
         std::fs::write(&temp_path, video_data).map_err(|e| {
@@ -270,110 +262,80 @@ impl AilThumbnail {
             ))
         })?;
 
-        let mut ictx = format::input(&temp_path).map_err(|e| {
-            EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to open video: {}", e),
-            ))
-        })?;
+        let thumb = crate::ffmpeg_util::with_ffmpeg(|| {
+            let mut ictx = format::input(&temp_path).map_err(|e| e.to_string())?;
 
-        let video_stream_index = ictx
-            .streams()
-            .best(ffmpeg_next::media::Type::Video)
-            .ok_or_else(|| {
-                EncoderError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "No video stream found",
-                ))
-            })?
-            .index();
+            let video_stream_index = ictx
+                .streams()
+                .best(ffmpeg_next::media::Type::Video)
+                .ok_or_else(|| "No video stream found".to_string())?
+                .index();
 
-        let stream = ictx.stream(video_stream_index).ok_or_else(|| {
-            EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to get video stream",
-            ))
-        })?;
-        let decoder_params = stream.parameters();
-        let decoder = codec::context::Context::from_parameters(decoder_params).map_err(|e| {
-            EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create decoder context: {}", e),
-            ))
-        })?;
-        let mut decoder = decoder.decoder().video().map_err(|e| {
-            EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to get video decoder: {}", e),
-            ))
-        })?;
+            let stream = ictx
+                .stream(video_stream_index)
+                .ok_or_else(|| "Failed to get video stream".to_string())?;
+            let decoder_params = stream.parameters();
+            let decoder = codec::context::Context::from_parameters(decoder_params)
+                .map_err(|e| format!("Failed to create decoder context: {e}"))?;
+            let mut decoder = decoder
+                .decoder()
+                .video()
+                .map_err(|e| format!("Failed to get video decoder: {e}"))?;
 
-        let mut scaler = scaling::Context::get(
-            decoder.format(),
-            decoder.width(),
-            decoder.height(),
-            Pixel::RGB24,
-            decoder.width(),
-            decoder.height(),
-            scaling::Flags::BILINEAR,
-        )
-        .map_err(|e| {
-            EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create scaler: {}", e),
-            ))
-        })?;
+            let mut scaler = scaling::Context::get(
+                decoder.format(),
+                decoder.width(),
+                decoder.height(),
+                Pixel::RGB24,
+                decoder.width(),
+                decoder.height(),
+                scaling::Flags::BILINEAR,
+            )
+            .map_err(|e| format!("Failed to create scaler: {e}"))?;
 
-        // Получаем первый кадр
-        for (_stream, packet) in ictx.packets() {
-            if _stream.index() == video_stream_index {
+            for (_stream, packet) in ictx.packets() {
+                if _stream.index() != video_stream_index {
+                    continue;
+                }
+
                 let mut decoded = frame::Video::empty();
-                if decoder.send_packet(&packet).is_ok() {
-                    if decoder.receive_frame(&mut decoded).is_ok() {
-                        let mut rgb_frame = frame::Video::empty();
-                        scaler.run(&decoded, &mut rgb_frame).ok();
+                if decoder.send_packet(&packet).is_err() {
+                    continue;
+                }
+                if decoder.receive_frame(&mut decoded).is_err() {
+                    continue;
+                }
 
-                        let width = decoder.width() as usize;
-                        let height = decoder.height() as usize;
-                        let stride = rgb_frame.stride(0) as usize;
+                let mut rgb_frame = frame::Video::empty();
+                scaler.run(&decoded, &mut rgb_frame).ok();
 
-                        let mut rgb_data = Vec::new();
-                        for y in 0..height {
-                            let offset = y * stride;
-                            for x in 0..width {
-                                let r = rgb_frame.data(0)[offset + x * 3];
-                                let g = rgb_frame.data(0)[offset + x * 3 + 1];
-                                let b = rgb_frame.data(0)[offset + x * 3 + 2];
-                                rgb_data.extend_from_slice(&[r, g, b]);
-                            }
-                        }
+                let width = decoder.width() as usize;
+                let height = decoder.height() as usize;
+                let stride = rgb_frame.stride(0) as usize;
 
-                        // Создаём изображение из RGB
-                        let img = image::RgbImage::from_raw(width as u32, height as u32, rgb_data)
-                            .ok_or_else(|| {
-                                EncoderError::Io(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "Failed to create image from frame",
-                                ))
-                            })?;
-
-                        // Удаляем временный файл
-                        let _ = std::fs::remove_file(&temp_path);
-
-                        let dynamic_img = image::DynamicImage::ImageRgb8(img);
-                        return Self::from_dynamic_image(&dynamic_img, max_size);
+                let mut rgb_data = Vec::new();
+                for y in 0..height {
+                    let offset = y * stride;
+                    for x in 0..width {
+                        let r = rgb_frame.data(0)[offset + x * 3];
+                        let g = rgb_frame.data(0)[offset + x * 3 + 1];
+                        let b = rgb_frame.data(0)[offset + x * 3 + 2];
+                        rgb_data.extend_from_slice(&[r, g, b]);
                     }
                 }
+
+                let img = image::RgbImage::from_raw(width as u32, height as u32, rgb_data)
+                    .ok_or_else(|| "Failed to create image from frame".to_string())?;
+                let dynamic_img = image::DynamicImage::ImageRgb8(img);
+                return Self::from_dynamic_image(&dynamic_img, max_size).map_err(|e| e.to_string());
             }
-        }
 
-        // Удаляем временный файл
+            Err("Failed to extract video frame".to_string())
+        })
+        .map_err(|e| EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
         let _ = std::fs::remove_file(&temp_path);
-
-        Err(EncoderError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Failed to extract video frame",
-        )))
+        Ok(thumb)
     }
 
     /// Внутренний метод для создания превью из DynamicImage

@@ -1,7 +1,7 @@
+use egui::{Context, TextureHandle, TextureOptions};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
-use egui::{Context, TextureHandle, TextureOptions};
 
 pub struct VideoPlayer {
     receiver: Receiver<(egui::ColorImage, f64)>,
@@ -63,7 +63,8 @@ impl VideoPlayer {
 
         if let Some((ref image, pts)) = self.next_frame {
             if pts <= elapsed {
-                let texture = ctx.load_texture("video_frame", image.clone(), TextureOptions::LINEAR);
+                let texture =
+                    ctx.load_texture("video_frame", image.clone(), TextureOptions::LINEAR);
                 self.current_texture = Some(texture);
                 self.next_frame = None;
             }
@@ -73,7 +74,8 @@ impl VideoPlayer {
             match self.receiver.try_recv() {
                 Ok((image, pts)) => {
                     if pts <= elapsed {
-                        let texture = ctx.load_texture("video_frame", image, TextureOptions::LINEAR);
+                        let texture =
+                            ctx.load_texture("video_frame", image, TextureOptions::LINEAR);
                         self.current_texture = Some(texture);
                     } else {
                         self.next_frame = Some((image, pts));
@@ -87,31 +89,6 @@ impl VideoPlayer {
 
         ctx.request_repaint();
         self.current_texture.as_ref()
-    }
-
-    pub fn ui(&mut self, _ctx: &Context, ui: &mut egui::Ui) {
-        let available_width = ui.available_width();
-        let slider_width = (available_width - 140.0).max(100.0);
-        let mut elapsed = self.elapsed().clamp(0.0, self.duration);
-
-        ui.horizontal(|ui| {
-            if ui.button(if self.is_paused { "?" } else { "?" }).clicked() {
-                self.toggle_pause();
-            }
-
-            if ui.button(if self.looping { "??" } else { "?" }).on_hover_text("Loop").clicked() {
-                self.looping = !self.looping;
-            }
-
-            ui.label(format!("{} / {}", fmt_time(elapsed), fmt_time(self.duration)));
-
-            ui.add_sized(
-                [slider_width, 20.0],
-                egui::Slider::new(&mut elapsed, 0.0..=self.duration)
-                    .show_value(false)
-                    .trailing_fill(true),
-            );
-        });
     }
 
     pub fn toggle_pause(&mut self) {
@@ -183,8 +160,13 @@ fn fmt_time(seconds: f64) -> String {
 
 fn probe_duration(path: &PathBuf) -> f64 {
     use ffmpeg_next::format;
-    if ffmpeg_next::init().is_err() { return 0.0; }
-    let ictx = match format::input(path) { Ok(c) => c, Err(_) => return 0.0 };
+    if ffmpeg_next::init().is_err() {
+        return 0.0;
+    }
+    let ictx = match format::input(path) {
+        Ok(c) => c,
+        Err(_) => return 0.0,
+    };
     ictx.duration() as f64 / 1_000_000.0
 }
 
@@ -195,14 +177,23 @@ fn decode_video_frames(
 ) {
     use ffmpeg_next::{codec, format, frame, software::scaling, util::format::Pixel};
 
-    if ffmpeg_next::init().is_err() { return; }
-    let mut ictx = match format::input(path) { Ok(c) => c, Err(_) => return };
+    if ffmpeg_next::init().is_err() {
+        return;
+    }
+    let mut ictx = match format::input(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
 
     let video_stream_index = match ictx.streams().best(ffmpeg_next::media::Type::Video) {
-        Some(s) => s.index(), None => return,
+        Some(s) => s.index(),
+        None => return,
     };
     let tb = {
-        let stream = match ictx.stream(video_stream_index) { Some(s) => s, None => return };
+        let stream = match ictx.stream(video_stream_index) {
+            Some(s) => s,
+            None => return,
+        };
         stream.time_base()
     };
 
@@ -211,29 +202,49 @@ fn decode_video_frames(
         let _ = ictx.seek(ts, ..);
     }
 
-    let stream = match ictx.stream(video_stream_index) { Some(s) => s, None => return };
+    let stream = match ictx.stream(video_stream_index) {
+        Some(s) => s,
+        None => return,
+    };
     let time_base = stream.time_base();
 
     let decoder_params = stream.parameters();
     let decoder = match codec::context::Context::from_parameters(decoder_params.clone()) {
-        Ok(d) => d, Err(_) => return,
+        Ok(d) => d,
+        Err(_) => return,
     };
-    let mut decoder = match decoder.decoder().video() { Ok(d) => d, Err(_) => return };
+    let mut decoder = match decoder.decoder().video() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
 
     let mut scaler = match scaling::Context::get(
-        decoder.format(), decoder.width(), decoder.height(),
-        Pixel::RGB24, decoder.width(), decoder.height(),
+        decoder.format(),
+        decoder.width(),
+        decoder.height(),
+        Pixel::RGB24,
+        decoder.width(),
+        decoder.height(),
         scaling::Flags::BILINEAR,
-    ) { Ok(s) => s, Err(_) => return };
+    ) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
 
     for (_stream, packet) in ictx.packets() {
-        if _stream.index() != video_stream_index { continue; }
+        if _stream.index() != video_stream_index {
+            continue;
+        }
         let mut decoded = frame::Video::empty();
-        if decoder.send_packet(&packet).is_err() { continue; }
+        if decoder.send_packet(&packet).is_err() {
+            continue;
+        }
 
         while decoder.receive_frame(&mut decoded).is_ok() {
             let mut rgb_frame = frame::Video::empty();
-            if scaler.run(&decoded, &mut rgb_frame).is_err() { continue; }
+            if scaler.run(&decoded, &mut rgb_frame).is_err() {
+                continue;
+            }
 
             let width = decoder.width() as usize;
             let height = decoder.height() as usize;
@@ -254,11 +265,17 @@ fn decode_video_frames(
 
             let size = [width, height];
             let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba_data);
-            let pts = decoded.timestamp().map(|ts| {
-                ts as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator())
-            }).unwrap_or(0.0);
+            let pts = decoded
+                .timestamp()
+                .map(|ts| {
+                    ts as f64 * f64::from(time_base.numerator())
+                        / f64::from(time_base.denominator())
+                })
+                .unwrap_or(0.0);
 
-            if sender.send((color_image, pts)).is_err() { return; }
+            if sender.send((color_image, pts)).is_err() {
+                return;
+            }
         }
     }
 }

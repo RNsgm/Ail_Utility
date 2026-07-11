@@ -1,7 +1,8 @@
-use crate::viewer::{GalleryView, ReaderView, EncoderView};
+use crate::viewer::{EncoderView, GalleryView, ReaderView};
 
 /// Основное состояние приложения
-pub struct ViewerApp {    gallery: GalleryView,
+pub struct ViewerApp {
+    gallery: GalleryView,
     reader: ReaderView,
     encoder: EncoderView,
     mode: AppMode,
@@ -23,6 +24,7 @@ impl ViewerApp {
             mode: AppMode::Gallery,
         }
     }
+
     pub fn run() -> eframe::Result {
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
@@ -40,36 +42,42 @@ impl ViewerApp {
 }
 
 impl eframe::App for ViewerApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        
-        // Боковая панель навигации
-        egui::SidePanel::left("nav_panel").show(&ctx, |ui| {
-            ui.heading("AIL Tool");
-            ui.add_space(10.0);
-            
-            if ui.selectable_label(self.mode == AppMode::Gallery, "🖼 Галерея").clicked() {
-                self.mode = AppMode::Gallery;
-            }
-            if ui.selectable_label(self.mode == AppMode::Encoder, "⚙ Кодировщик").clicked() {
-                self.mode = AppMode::Encoder;
-            }
-        });
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::Panel::left("nav_panel")
+            .resizable(false)
+            .default_width(160.0)
+            .show(ctx, |ui| {
+                ui.heading("AIL Tool");
+                ui.add_space(10.0);
+
+                if ui
+                    .selectable_label(self.mode == AppMode::Gallery, "🖼 Галерея")
+                    .clicked()
+                {
+                    self.mode = AppMode::Gallery;
+                }
+                if ui
+                    .selectable_label(self.mode == AppMode::Encoder, "⚙ Кодировщик")
+                    .clicked()
+                {
+                    self.mode = AppMode::Encoder;
+                }
+            });
 
         match self.mode {
             AppMode::Gallery => {
-                egui::CentralPanel::default().show(&ctx, |ui| {
-                    let response = self.gallery.ui(&ctx, ui);
+                egui::CentralPanel::default().show_inside(ctx, |ui| {
+                    let response = self.gallery.ui(ctx, ui);
 
                     if let Some(path) = response.clicked_file {
-                        self.reader.open_file(&ctx, path);
+                        self.reader.open_file(ctx, path);
                         self.mode = AppMode::Reader;
                     }
                 });
             }
             AppMode::Reader => {
-                egui::CentralPanel::default().show(&ctx, |ui| {
-                    let response = self.reader.ui(&ctx, ui);
+                egui::CentralPanel::default().show_inside(ctx, |ui| {
+                    let response = self.reader.ui(ctx, ui);
 
                     if response.close_requested {
                         self.reader.close();
@@ -79,14 +87,14 @@ impl eframe::App for ViewerApp {
                 });
             }
             AppMode::Encoder => {
-                egui::CentralPanel::default().show(&ctx, |ui| {
-                    self.encoder.ui(&ctx, ui);
+                egui::CentralPanel::default().show_inside(ctx, |ui| {
+                    self.encoder.ui(ctx, ui);
                 });
             }
         }
     }
 }
-            
+
 /// Запускает приложение просмотрщика
 pub fn run_viewer() -> eframe::Result {
     ViewerApp::run()

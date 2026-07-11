@@ -1,44 +1,38 @@
 [package]
 name = "ArchiveUtils"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[lib]
+name = "ArchiveUtils"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ArchiveUtils"
+path = "src/main.rs"
+required-features = ["gui"]
 
 [dependencies]
-# Работа с ZIP архивами
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
-
-# Работа с RAR архивами
 unrar = { version = "0.5", optional = true }
-
-# Сжатие данных
 zstd = "0.13"
 lz4 = "1.28"
-
-# Хеширование MD5
 md5 = "0.8.0"
-
-# Сортировка строк с числами (для правильной сортировки 1, 2, 10 вместо 1, 10, 2)
 alphanumeric-sort = "1.5"
-
-# Диалог выбора файлов/папок (старая версия для совместимости с windows API)
-rfd = "0.14"
-
-# UI фреймворк (используем glow вместо wgpu чтобы избежать конфликтов Windows API)
-egui = "0.34.2"
-eframe = { version = "0.34.2", default-features = false, features = ["glow", "default_fonts"] }
-
-# Работа с изображениями для UI
+rfd = { version = "0.14", optional = true }
+egui = { version = "0.34.2", optional = true }
+eframe = { version = "0.34.2", default-features = false, optional = true, features = ["glow", "default_fonts"] }
 image = { version = "0.25", features = ["jpeg", "png", "webp", "gif", "bmp"] }
-
-# Работа с видео (MP4) через ffmpeg
-ffmpeg-next = { git = "https://github.com/zmwangx/rust-ffmpeg", branch = "master", features = ["format"] }
-
-# Асинхронность для загрузки
-tokio = { version = "1.42", features = ["rt-multi-thread"] }
+ffmpeg-next = { git = "https://github.com/zmwangx/rust-ffmpeg", branch = "master", optional = true, features = ["format"] }
 aes-gcm = "0.10.3"
 rand = "0.10.1"
 sevenz-rust = "0.6.1"
 
 [features]
-default = ["unrar"]
+default = ["gui", "unrar", "ffmpeg"]
+gui = ["dep:egui", "dep:eframe", "dep:rfd"]
+ffmpeg = ["dep:ffmpeg-next"]
 unrar = ["dep:unrar"]
+
+[dev-dependencies]
+tempfile = "3.14"

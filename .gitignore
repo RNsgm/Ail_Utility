@@ -2,3 +2,5 @@ target/
 ffmpeg/
 *.exe
 key.bin
+build_output.txt
+build_check.txt

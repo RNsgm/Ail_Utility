@@ -1,13 +1,15 @@
-﻿use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver};
-use egui::{Context, Ui, Vec2, Key, RichText};
 use crate::decoder::AilDecoder;
 use crate::encoder::MediaType;
-use crate::viewer::texture_loader::{TextureCache, load_color_images_from_memory, load_gif_color_images, GifFrame};
+use crate::viewer::texture_loader::{
+    load_color_images_from_memory, load_gif_color_images, GifFrame, TextureCache,
+};
 use crate::viewer::video_player::VideoPlayer;
+use egui::{Context, Key, RichText, Ui, Vec2};
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver};
 
 #[derive(Debug, Clone, PartialEq)]
-enum LoadMessage {    
+enum LoadMessage {
     TotalPages(usize),
     PageData(usize, Vec<egui::ColorImage>),
     GifFrames(Vec<(egui::ColorImage, u64)>),
@@ -48,7 +50,8 @@ pub struct ReaderView {
     gif_current_frame: usize,
     gif_last_frame_time: std::time::Instant,
     gif_looping: bool,
-    video_player: Option<VideoPlayer>,    current_media_type: MediaType,
+    video_player: Option<VideoPlayer>,
+    current_media_type: MediaType,
     entry_names: Vec<String>,
 }
 
@@ -72,7 +75,8 @@ impl ReaderView {
             gif_current_frame: 0,
             gif_last_frame_time: std::time::Instant::now(),
             gif_looping: true,
-            video_player: None,            current_media_type: MediaType::Image,
+            video_player: None,
+            current_media_type: MediaType::Image,
             entry_names: Vec::new(),
         }
     }
@@ -86,7 +90,8 @@ impl ReaderView {
         self.total_pages = 0;
         self.last_queue_update_page = 999999;
         self.clear_media_state();
-        self.gif_last_frame_time = std::time::Instant::now();        self.current_media_type = MediaType::Image;
+        self.gif_last_frame_time = std::time::Instant::now();
+        self.current_media_type = MediaType::Image;
         self.entry_names.clear();
 
         let (tx, rx) = channel();
@@ -108,21 +113,34 @@ impl ReaderView {
             };
 
             let count = decoder.len();
-            let names: Vec<String> = decoder.entries().iter().map(|e| e.original_name.clone()).collect();
+            let names: Vec<String> = decoder
+                .entries()
+                .iter()
+                .map(|e| e.original_name.clone())
+                .collect();
             let _ = tx.send(LoadMessage::TotalPages(count));
             let _ = tx.send(LoadMessage::EntryNames(names));
             ctx_clone.request_repaint();
 
             while let Ok(page_idx) = req_rx.recv() {
-                if page_idx >= count { continue; }
+                if page_idx >= count {
+                    continue;
+                }
 
                 if let Ok(data) = decoder.read_image(page_idx) {
                     let entry = decoder.get_entry(page_idx);
                     let name = entry.map(|e| e.original_name.as_str()).unwrap_or("");
                     let media_type = MediaType::from_path(name);
 
-                    if entry.map(|e| e.entry_type == crate::encoder::EntryType::Video).unwrap_or(false) {
-                        let temp_name = format!("archive_utils_video_{}_{}.mp4", std::process::id(), page_idx);
+                    if entry
+                        .map(|e| e.entry_type == crate::encoder::EntryType::Video)
+                        .unwrap_or(false)
+                    {
+                        let temp_name = format!(
+                            "archive_utils_video_{}_{}.mp4",
+                            std::process::id(),
+                            page_idx
+                        );
                         let temp_path = std::env::temp_dir().join(&temp_name);
                         if std::fs::write(&temp_path, &data).is_ok() {
                             let _ = tx.send(LoadMessage::VideoTempPath(temp_path));
@@ -133,9 +151,13 @@ impl ReaderView {
                             let _ = tx.send(LoadMessage::GifFrames(frames));
                             ctx_clone.request_repaint();
                         }
-                    } else {                        let color_images = load_color_images_from_memory(&data);
+                    } else {
+                        let color_images = load_color_images_from_memory(&data);
                         if !color_images.is_empty() {
-                            if tx.send(LoadMessage::PageData(page_idx, color_images)).is_err() {
+                            if tx
+                                .send(LoadMessage::PageData(page_idx, color_images))
+                                .is_err()
+                            {
                                 break;
                             }
                             ctx_clone.request_repaint();
@@ -152,9 +174,15 @@ impl ReaderView {
         let Some(tx) = &self.load_sender else { return };
         let current = self.current_page;
         let total = self.total_pages;
-        if total == 0 { return; }
+        if total == 0 {
+            return;
+        }
 
-        let diff = if current > self.last_queue_update_page { current - self.last_queue_update_page } else { self.last_queue_update_page - current };
+        let diff = if current > self.last_queue_update_page {
+            current - self.last_queue_update_page
+        } else {
+            self.last_queue_update_page - current
+        };
         if !force && diff < 5 {
             return;
         }
@@ -163,8 +191,12 @@ impl ReaderView {
         let range = 20;
         let mut pages_to_load = vec![current];
         for i in 1..=range {
-            if current + i < total { pages_to_load.push(current + i); }
-            if current >= i { pages_to_load.push(current - i); }
+            if current + i < total {
+                pages_to_load.push(current + i);
+            }
+            if current >= i {
+                pages_to_load.push(current - i);
+            }
         }
 
         for page in pages_to_load {
@@ -177,11 +209,19 @@ impl ReaderView {
 
         let keep_range = 25;
         self.loaded_pages.retain(|&idx, _| {
-            let diff = if idx > current { idx - current } else { current - idx };
+            let diff = if idx > current {
+                idx - current
+            } else {
+                current - idx
+            };
             diff <= keep_range
         });
         self.requested_pages.retain(|&idx| {
-            let diff = if idx > current { idx - current } else { current - idx };
+            let diff = if idx > current {
+                idx - current
+            } else {
+                current - idx
+            };
             diff <= range + 5
         });
     }
@@ -195,14 +235,6 @@ impl ReaderView {
         self.load_receiver = None;
         self.clear_media_state();
         self.entry_names.clear();
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.decoder.is_some()
-    }
-
-    pub fn current_file(&self) -> Option<&PathBuf> {
-        self.current_file.as_ref()
     }
 
     pub fn next_page(&mut self) {
@@ -234,6 +266,7 @@ impl ReaderView {
         self.gif_frames = None;
         self.gif_current_frame = 0;
     }
+
     pub fn ui(&mut self, ctx: &Context, _ui: &mut Ui) -> ReaderResponse {
         let mut response = ReaderResponse::default();
         let mut should_update_queue = false;
@@ -281,7 +314,9 @@ impl ReaderView {
                         self.video_player = Some(VideoPlayer::new(ctx, path));
                     }
                 }
-                if processed >= 2 { break; }           
+                if processed >= 2 {
+                    break;
+                }
             }
         }
 
@@ -292,7 +327,7 @@ impl ReaderView {
         self.handle_input(ctx, &mut response);
 
         if self.total_pages == 0 && self.load_receiver.is_none() {
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show_inside(ctx, |ui| {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new("Нет открытого файла").size(24.0));
                 });
@@ -301,7 +336,8 @@ impl ReaderView {
         }
 
         let total_pages = self.total_pages;
-        let title = self.current_file
+        let title = self
+            .current_file
             .as_ref()
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str())
@@ -309,7 +345,7 @@ impl ReaderView {
             .to_string();
 
         if self.show_ui {
-            egui::TopBottomPanel::top("reader_top").show(ctx, |ui| {
+            egui::Panel::top("reader_top").show_inside(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("<- Назад").clicked() {
                         response.close_requested = true;
@@ -324,10 +360,26 @@ impl ReaderView {
                         egui::ComboBox::from_label("")
                             .selected_text(format!("{:?}", self.mode))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.mode, ReaderMode::FitWindow, "По окну");
-                                ui.selectable_value(&mut self.mode, ReaderMode::FitWidth, "По ширине");
-                                ui.selectable_value(&mut self.mode, ReaderMode::FitHeight, "По высоте");
-                                ui.selectable_value(&mut self.mode, ReaderMode::Original, "Оригинал");
+                                ui.selectable_value(
+                                    &mut self.mode,
+                                    ReaderMode::FitWindow,
+                                    "По окну",
+                                );
+                                ui.selectable_value(
+                                    &mut self.mode,
+                                    ReaderMode::FitWidth,
+                                    "По ширине",
+                                );
+                                ui.selectable_value(
+                                    &mut self.mode,
+                                    ReaderMode::FitHeight,
+                                    "По высоте",
+                                );
+                                ui.selectable_value(
+                                    &mut self.mode,
+                                    ReaderMode::Original,
+                                    "Оригинал",
+                                );
                             });
 
                         if ui.button("⏭").clicked() {
@@ -340,20 +392,30 @@ impl ReaderView {
                 });
             });
 
-            egui::TopBottomPanel::bottom("reader_bottom").show(ctx, |ui| {
+            egui::Panel::bottom("reader_bottom").show_inside(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Страница:");
                     let mut page = self.current_page + 1;
-                    if ui.add(egui::DragValue::new(&mut page).range(1..=total_pages)).changed() {
+                    if ui
+                        .add(egui::DragValue::new(&mut page).range(1..=total_pages))
+                        .changed()
+                    {
                         self.go_to_page(page.saturating_sub(1));
                     }
                     ui.label(format!("/ {}", total_pages));
 
                     ui.add_space(20.0);
                     let mut progress = self.current_page as f32;
-                    if ui.add(egui::Slider::new(&mut progress, 0.0..=(total_pages.saturating_sub(1)) as f32)
-                        .show_value(false))
-                        .changed() {
+                    if ui
+                        .add(
+                            egui::Slider::new(
+                                &mut progress,
+                                0.0..=(total_pages.saturating_sub(1)) as f32,
+                            )
+                            .show_value(false),
+                        )
+                        .changed()
+                    {
                         self.go_to_page(progress as usize);
                     }
                 });
@@ -364,13 +426,21 @@ impl ReaderView {
         let mode = self.mode;
         let zoom = self.zoom_level;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ctx, |ui| {
             let scroll_delta = ctx.input(|i| {
                 let mut delta = 0.0;
-                if i.key_down(Key::ArrowDown) { delta -= 20.0; }
-                if i.key_down(Key::ArrowUp) { delta += 20.0; }
-                if i.key_pressed(Key::PageDown) { delta -= 500.0; }
-                if i.key_pressed(Key::PageUp) { delta += 500.0; }
+                if i.key_down(Key::ArrowDown) {
+                    delta -= 20.0;
+                }
+                if i.key_down(Key::ArrowUp) {
+                    delta += 20.0;
+                }
+                if i.key_pressed(Key::PageDown) {
+                    delta -= 500.0;
+                }
+                if i.key_pressed(Key::PageUp) {
+                    delta += 500.0;
+                }
                 delta
             });
 
@@ -411,13 +481,7 @@ impl ReaderView {
         }
     }
 
-    fn render_gif(
-        &mut self,
-        ctx: &Context,
-        ui: &mut Ui,
-        mode: ReaderMode,
-        zoom_level: f32,
-    ) {
+    fn render_gif(&mut self, ctx: &Context, ui: &mut Ui, mode: ReaderMode, zoom_level: f32) {
         let Some(ref frames) = self.gif_frames else {
             ui.centered_and_justified(|ui| {
                 ui.spinner();
@@ -450,7 +514,7 @@ impl ReaderView {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(
-                (current_frame.delay_ms - elapsed).min(100)
+                (current_frame.delay_ms - elapsed).min(100),
             ));
         }
 
@@ -487,19 +551,22 @@ impl ReaderView {
 
         // GIF controls
         ui.horizontal(|ui| {
-            if ui.button(if self.gif_looping { "🔁" } else { "➡" }).on_hover_text("Loop").clicked() {
+            if ui
+                .button(if self.gif_looping { "🔁" } else { "➡" })
+                .on_hover_text("Loop")
+                .clicked()
+            {
                 self.gif_looping = !self.gif_looping;
             }
-            ui.label(format!("Кадр {} / {}", self.gif_current_frame + 1, frames.len()));
+            ui.label(format!(
+                "Кадр {} / {}",
+                self.gif_current_frame + 1,
+                frames.len()
+            ));
         });
     }
-    fn render_video(
-        &mut self,
-        ctx: &Context,
-        ui: &mut Ui,
-        mode: ReaderMode,
-        zoom_level: f32,
-    ) {
+
+    fn render_video(&mut self, ctx: &Context, ui: &mut Ui, mode: ReaderMode, zoom_level: f32) {
         let Some(ref mut player) = self.video_player else {
             ui.centered_and_justified(|ui| {
                 ui.spinner();
@@ -551,15 +618,26 @@ impl ReaderView {
         let mut seek_target = None;
 
         ui.horizontal(|ui| {
-            if ui.button(if player.is_paused { "▶" } else { "⏸" }).clicked() {
+            if ui
+                .button(if player.is_paused { "▶" } else { "⏸" })
+                .clicked()
+            {
                 player.toggle_pause();
             }
 
-            if ui.button(if player.looping { "🔁" } else { "➡" }).on_hover_text("Loop").clicked() {
+            if ui
+                .button(if player.looping { "🔁" } else { "➡" })
+                .on_hover_text("Loop")
+                .clicked()
+            {
                 player.looping = !player.looping;
             }
 
-            ui.label(format!("{} / {}", fmt_time(elapsed), fmt_time(player.duration)));
+            ui.label(format!(
+                "{} / {}",
+                fmt_time(elapsed),
+                fmt_time(player.duration)
+            ));
 
             let slider_width = ui.available_width() - 20.0;
             let mut slider_val = elapsed;
@@ -578,13 +656,8 @@ impl ReaderView {
             player.seek_to(ctx, target);
         }
     }
-    fn render_image(
-        &mut self,
-        ui: &mut Ui,
-        page: usize,
-        mode: ReaderMode,
-        zoom_level: f32,
-    ) {
+
+    fn render_image(&mut self, ui: &mut Ui, page: usize, mode: ReaderMode, zoom_level: f32) {
         let textures = self.loaded_pages.get(&page);
 
         let Some(textures) = textures else {
@@ -703,11 +776,4 @@ fn fmt_time(seconds: f64) -> String {
     } else {
         format!("{:02}:{:02}", mins, rem)
     }
-}
-
-fn fit_size(image_size: Vec2, container_size: Vec2) -> Vec2 {
-    let ratio_x = container_size.x / image_size.x;
-    let ratio_y = container_size.y / image_size.y;
-    let ratio = ratio_x.min(ratio_y).min(1.0);
-    Vec2::new(image_size.x * ratio, image_size.y * ratio)
 }

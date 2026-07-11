@@ -12,7 +12,7 @@ const AUDIO_BUFFER_SAMPLES: usize = 48_000 * 2 * 2;
 /// Keep the decode thread this far ahead of playback.
 const AUDIO_AHEAD_SECS: f64 = 1.5;
 /// Don't start speakers until at least this much audio is buffered.
-const AUDIO_PREFILL_SECS: f64 = 0.75;
+const AUDIO_PREFILL_SECS: f64 = 0.25;
 
 pub struct AudioPlayer {
     cancel: Arc<AtomicBool>,
@@ -46,14 +46,17 @@ impl AudioPlayer {
                 &config.into(),
                 move |data: &mut [f32], _| {
                     let vol = volume_cb.load(Ordering::Relaxed) as f32 / 1000.0;
-                    samples_cb.fetch_add(data.len() as u64, Ordering::Relaxed);
                     let mut guard = match buffer_cb.lock() {
                         Ok(g) => g,
                         Err(_) => return,
                     };
                     for sample in data.iter_mut() {
-                        let v = guard.pop_front().unwrap_or(0.0) * vol;
-                        *sample = v.clamp(-1.0, 1.0);
+                        if let Some(v) = guard.pop_front() {
+                            samples_cb.fetch_add(1, Ordering::Relaxed);
+                            *sample = (v * vol).clamp(-1.0, 1.0);
+                        } else {
+                            *sample = 0.0;
+                        }
                     }
                 },
                 move |err| {

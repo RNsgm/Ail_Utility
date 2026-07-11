@@ -537,12 +537,11 @@ fn encode_video_file_to_ail(
     let video_path = converted_path.as_deref().unwrap_or(input_path);
     let meta = std::fs::metadata(video_path).ok();
     log_info!(
-        "encode_video: reading {} ({} bytes)",
+        "encode_video: source {} ({} bytes)",
         video_path.display(),
         meta.map(|m| m.len()).unwrap_or(0)
     );
 
-    let data = std::fs::read(video_path)?;
     let name = if converted_path.is_some() {
         mp4_output_path(input_path)
             .file_name()
@@ -559,7 +558,7 @@ fn encode_video_file_to_ail(
 
     let mut builder = AilBuilder::new().with_thumbnail_size(options.thumbnail_size);
     log_info!("encode_video: built blob name={name}");
-    builder.add_video_blob(name, data, options.compression)?;
+    builder.add_video_blob_from_path(video_path, name, options.compression)?;
 
     let output_file = File::create(output_path)?;
     let mut writer = std::io::BufWriter::new(output_file);

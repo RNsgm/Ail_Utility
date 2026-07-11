@@ -1,6 +1,12 @@
 ﻿use std::io::{Read, Write};
+use std::path::Path;
 
 use super::{EncoderError, AIL_MAGIC, AIL_VERSION};
+
+#[cfg(feature = "ffmpeg")]
+const MAX_THUMB_PACKETS: usize = 8_000;
+#[cfg(feature = "ffmpeg")]
+const THUMB_PACKET_LOG_STEP: usize = 500;
 
 const MAX_ENTRY_NAME_LEN: usize = 1024;
 
@@ -240,19 +246,33 @@ impl AilThumbnail {
         Self::from_dynamic_image(&dynamic_img, max_size)
     }
 
-    /// Создает превью из первого кадра видео через FFmpeg
+    /// Создает превью из первого кадра видео по пути на диске (без копии в temp).
+    #[cfg(feature = "ffmpeg")]
+    pub fn from_video_path(path: &Path, max_size: u32) -> Result<Self, EncoderError> {
+        let meta = std::fs::metadata(path).ok();
+        crate::log_info!(
+            "AilThumbnail::from_video_path: path={} size={}",
+            path.display(),
+            meta.map(|m| m.len()).unwrap_or(0)
+        );
+
+        let thumb = crate::ffmpeg_util::with_ffmpeg(|| Self::extract_first_video_frame(path, max_size))
+            .map_err(|e| {
+                crate::log_error!("AilThumbnail::from_video_path failed: {e}");
+                EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+            })?;
+
+        crate::log_info!("AilThumbnail::from_video_path: OK");
+        Ok(thumb)
+    }
+
+    /// Создает превью из буфера видео (пишет во временный файл).
     #[cfg(feature = "ffmpeg")]
     pub fn from_video(
         video_data: &[u8],
         max_size: u32,
         name_hint: Option<&str>,
     ) -> Result<Self, EncoderError> {
-        use ffmpeg_next::codec;
-        use ffmpeg_next::format;
-        use ffmpeg_next::frame;
-        use ffmpeg_next::software::scaling;
-        use ffmpeg_next::util::format::Pixel;
-
         let hint = name_hint.unwrap_or("video.mp4");
         let temp_path = crate::encoder::temp_video_path("ail_video_thumb", hint);
         crate::log_info!(
@@ -267,85 +287,108 @@ impl AilThumbnail {
             ))
         })?;
 
-        let thumb = crate::ffmpeg_util::with_ffmpeg(|| {
-            let mut ictx = format::input(&temp_path).map_err(|e| e.to_string())?;
+        let result = Self::from_video_path(&temp_path, max_size);
+        let _ = std::fs::remove_file(&temp_path);
+        result
+    }
 
-            let video_stream_index = ictx
-                .streams()
-                .best(ffmpeg_next::media::Type::Video)
-                .ok_or_else(|| "No video stream found".to_string())?
-                .index();
+    #[cfg(feature = "ffmpeg")]
+    fn extract_first_video_frame(path: &Path, max_size: u32) -> Result<Self, String> {
+        use ffmpeg_next::codec;
+        use ffmpeg_next::format;
+        use ffmpeg_next::frame;
+        use ffmpeg_next::software::scaling;
+        use ffmpeg_next::util::format::Pixel;
 
-            let stream = ictx
-                .stream(video_stream_index)
-                .ok_or_else(|| "Failed to get video stream".to_string())?;
-            let decoder_params = stream.parameters();
-            let decoder = codec::context::Context::from_parameters(decoder_params)
-                .map_err(|e| format!("Failed to create decoder context: {e}"))?;
-            let mut decoder = decoder
-                .decoder()
-                .video()
-                .map_err(|e| format!("Failed to get video decoder: {e}"))?;
+        crate::log_info!("AilThumbnail: opening {}", path.display());
+        let mut ictx = format::input(path).map_err(|e| e.to_string())?;
 
-            let mut scaler = scaling::Context::get(
-                decoder.format(),
-                decoder.width(),
-                decoder.height(),
-                Pixel::RGB24,
-                decoder.width(),
-                decoder.height(),
-                scaling::Flags::BILINEAR,
-            )
-            .map_err(|e| format!("Failed to create scaler: {e}"))?;
+        let video_stream_index = ictx
+            .streams()
+            .best(ffmpeg_next::media::Type::Video)
+            .ok_or_else(|| "No video stream found".to_string())?
+            .index();
 
-            for (_stream, packet) in ictx.packets() {
-                if _stream.index() != video_stream_index {
-                    continue;
-                }
+        let stream = ictx
+            .stream(video_stream_index)
+            .ok_or_else(|| "Failed to get video stream".to_string())?;
+        let decoder_params = stream.parameters();
+        let decoder = codec::context::Context::from_parameters(decoder_params)
+            .map_err(|e| format!("Failed to create decoder context: {e}"))?;
+        let mut decoder = decoder
+            .decoder()
+            .video()
+            .map_err(|e| format!("Failed to get video decoder: {e}"))?;
 
-                let mut decoded = frame::Video::empty();
-                if decoder.send_packet(&packet).is_err() {
-                    continue;
-                }
-                if decoder.receive_frame(&mut decoded).is_err() {
-                    continue;
-                }
+        crate::log_info!(
+            "AilThumbnail: stream={video_stream_index} {}x{} fmt={:?}",
+            decoder.width(),
+            decoder.height(),
+            decoder.format()
+        );
 
-                let mut rgb_frame = frame::Video::empty();
-                scaler.run(&decoded, &mut rgb_frame).ok();
+        let mut scaler = scaling::Context::get(
+            decoder.format(),
+            decoder.width(),
+            decoder.height(),
+            Pixel::RGB24,
+            decoder.width(),
+            decoder.height(),
+            scaling::Flags::BILINEAR,
+        )
+        .map_err(|e| format!("Failed to create scaler: {e}"))?;
 
-                let width = decoder.width() as usize;
-                let height = decoder.height() as usize;
-                let stride = rgb_frame.stride(0) as usize;
-
-                let mut rgb_data = Vec::new();
-                for y in 0..height {
-                    let offset = y * stride;
-                    for x in 0..width {
-                        let r = rgb_frame.data(0)[offset + x * 3];
-                        let g = rgb_frame.data(0)[offset + x * 3 + 1];
-                        let b = rgb_frame.data(0)[offset + x * 3 + 2];
-                        rgb_data.extend_from_slice(&[r, g, b]);
-                    }
-                }
-
-                let img = image::RgbImage::from_raw(width as u32, height as u32, rgb_data)
-                    .ok_or_else(|| "Failed to create image from frame".to_string())?;
-                let dynamic_img = image::DynamicImage::ImageRgb8(img);
-                return Self::from_dynamic_image(&dynamic_img, max_size).map_err(|e| e.to_string());
+        let mut packet_count = 0usize;
+        for (_stream, packet) in ictx.packets() {
+            packet_count += 1;
+            if packet_count == 1 || packet_count % THUMB_PACKET_LOG_STEP == 0 {
+                crate::log_info!("AilThumbnail: packets={packet_count}");
+            }
+            if packet_count > MAX_THUMB_PACKETS {
+                return Err(format!(
+                    "No decodable video frame within {MAX_THUMB_PACKETS} packets"
+                ));
             }
 
-            Err("Failed to extract video frame".to_string())
-        })
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            crate::log_error!("AilThumbnail::from_video failed: {e}");
-            EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-        })?;
+            if _stream.index() != video_stream_index {
+                continue;
+            }
 
-        let _ = std::fs::remove_file(&temp_path);
-        crate::log_info!("AilThumbnail::from_video: OK");
-        Ok(thumb)
+            let mut decoded = frame::Video::empty();
+            if decoder.send_packet(&packet).is_err() {
+                continue;
+            }
+            if decoder.receive_frame(&mut decoded).is_err() {
+                continue;
+            }
+
+            crate::log_info!("AilThumbnail: decoded frame at packet {packet_count}");
+
+            let mut rgb_frame = frame::Video::empty();
+            scaler.run(&decoded, &mut rgb_frame).ok();
+
+            let width = decoder.width() as usize;
+            let height = decoder.height() as usize;
+            let stride = rgb_frame.stride(0) as usize;
+
+            let mut rgb_data = Vec::new();
+            for y in 0..height {
+                let offset = y * stride;
+                for x in 0..width {
+                    let r = rgb_frame.data(0)[offset + x * 3];
+                    let g = rgb_frame.data(0)[offset + x * 3 + 1];
+                    let b = rgb_frame.data(0)[offset + x * 3 + 2];
+                    rgb_data.extend_from_slice(&[r, g, b]);
+                }
+            }
+
+            let img = image::RgbImage::from_raw(width as u32, height as u32, rgb_data)
+                .ok_or_else(|| "Failed to create image from frame".to_string())?;
+            let dynamic_img = image::DynamicImage::ImageRgb8(img);
+            return Self::from_dynamic_image(&dynamic_img, max_size).map_err(|e| e.to_string());
+        }
+
+        Err("Failed to extract video frame".to_string())
     }
 
     /// Внутренний метод для создания превью из DynamicImage
@@ -720,6 +763,31 @@ impl AilBuilder {
         Ok(())
     }
 
+    /// Добавляет видео с диска: превью читается по пути, данные — одним чтением файла.
+    pub fn add_video_blob_from_path(
+        &mut self,
+        video_path: &Path,
+        original_name: String,
+        compression: CompressionType,
+    ) -> Result<(), EncoderError> {
+        if self.thumbnail.is_none() {
+            #[cfg(feature = "ffmpeg")]
+            {
+                match AilThumbnail::from_video_path(video_path, self.thumbnail_max_size) {
+                    Ok(thumb) => {
+                        self.thumbnail = Some(thumb);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create video thumbnail: {e}");
+                    }
+                }
+            }
+        }
+
+        let data = std::fs::read(video_path)?;
+        self.add_video_blob_data(original_name, data, compression)
+    }
+
     /// Добавляет видео как один бинарный blob
     pub fn add_video_blob(
         &mut self,
@@ -727,9 +795,6 @@ impl AilBuilder {
         data: Vec<u8>,
         compression: CompressionType,
     ) -> Result<(), EncoderError> {
-        let original_size = data.len() as u64;
-
-        // Создаем превью из первого кадра видео (если еще не создано)
         if self.thumbnail.is_none() {
             #[cfg(feature = "ffmpeg")]
             {
@@ -745,7 +810,17 @@ impl AilBuilder {
             }
         }
 
-        // Сжимаем данные
+        self.add_video_blob_data(original_name, data, compression)
+    }
+
+    fn add_video_blob_data(
+        &mut self,
+        original_name: String,
+        data: Vec<u8>,
+        compression: CompressionType,
+    ) -> Result<(), EncoderError> {
+        let original_size = data.len() as u64;
+
         let mut data_to_store = match compression {
             CompressionType::None => data.clone(),
             CompressionType::Zstd => zstd::encode_all(&data[..], 3)?,

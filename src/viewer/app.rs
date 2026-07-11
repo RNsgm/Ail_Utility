@@ -64,7 +64,7 @@ impl eframe::App for ViewerApp {
 
         egui::Panel::left("nav_panel")
             .resizable(false)
-            .default_width(NAV_WIDTH)
+            .default_size(NAV_WIDTH)
             .frame(
                 egui::Frame::new()
                     .fill(theme::panel())

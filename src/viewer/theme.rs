@@ -74,7 +74,7 @@ pub fn log_err() -> Color32 {
 }
 
 pub fn apply(ctx: &Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.spacing.item_spacing = Vec2::new(12.0, 12.0);
     style.spacing.button_padding = Vec2::new(14.0, 9.0);
     style.spacing.indent = 20.0;

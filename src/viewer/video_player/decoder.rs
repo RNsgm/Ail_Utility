@@ -9,7 +9,7 @@ use crate::{log_error, log_info};
 
 use super::presenter::DecodedFrame;
 
-const FRAME_BUFFER: usize = 3;
+const FRAME_BUFFER: usize = 8;
 
 pub struct VideoDecoder {
     receiver: Receiver<DecodedFrame>,
@@ -41,6 +41,35 @@ impl VideoDecoder {
         if let Some(cancel) = self.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
+    }
+}
+
+pub fn probe_fps(path: &PathBuf) -> f64 {
+    #[cfg(feature = "ffmpeg")]
+    {
+        use ffmpeg_next::format;
+
+        return crate::ffmpeg_util::with_ffmpeg(|| {
+            let ictx = format::input(path).map_err(|e| e.to_string())?;
+            let stream = ictx
+                .streams()
+                .best(ffmpeg_next::media::Type::Video)
+                .ok_or_else(|| "No video stream".to_string())?;
+            let avg_rate = stream.avg_frame_rate();
+            let fps = if avg_rate.denominator() > 0 {
+                avg_rate.numerator() as f64 / avg_rate.denominator() as f64
+            } else {
+                30.0
+            };
+            Ok(fps.max(1.0))
+        })
+        .unwrap_or(30.0);
+    }
+
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        let _ = path;
+        30.0
     }
 }
 
@@ -83,62 +112,55 @@ fn decode_loop(
             path.display()
         );
 
-        let mut decoder = match crate::ffmpeg_util::with_ffmpeg(|| DecoderState::open(path, start_secs))
-        {
-            Ok(state) => state,
-            Err(e) => {
-                log_error!("video_decode open failed for {}: {e}", path.display());
-                return;
-            }
-        };
-
-        let mut frames_sent = 0u64;
-
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                log_info!("video_decode: cancelled path={}", path.display());
-                break;
-            }
-
-            let frame = match crate::ffmpeg_util::with_ffmpeg(|| decoder.next_frame()) {
-                Ok(frame) => frame,
-                Err(e) => {
-                    log_error!("video_decode frame error for {}: {e}", path.display());
-                    break;
-                }
-            };
-
-            let Some(mut pending) = frame else {
-                log_info!(
-                    "video_decode: EOF path={} frames_sent={frames_sent}",
-                    path.display()
-                );
-                break;
-            };
+        let result = crate::ffmpeg_util::with_ffmpeg(|| {
+            let mut decoder = DecoderState::open(path, start_secs)?;
+            let mut frames_sent = 0u64;
 
             loop {
                 if cancel.load(Ordering::Relaxed) {
-                    return;
+                    log_info!("video_decode: cancelled path={}", path.display());
+                    break;
                 }
 
-                match sender.try_send(pending) {
-                    Ok(()) => {
-                        frames_sent += 1;
-                        if frames_sent == 1 || frames_sent % 30 == 0 {
-                            log_info!("video_decode: sent frame #{frames_sent}");
+                let frame = decoder.next_frame()?;
+                let Some(mut pending) = frame else {
+                    log_info!(
+                        "video_decode: EOF path={} frames_sent={frames_sent}",
+                        path.display()
+                    );
+                    break;
+                };
+
+                loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+
+                    match sender.try_send(pending) {
+                        Ok(()) => {
+                            frames_sent += 1;
+                            if frames_sent == 1 || frames_sent % 30 == 0 {
+                                log_info!("video_decode: sent frame #{frames_sent}");
+                            }
+                            break;
                         }
-                        break;
-                    }
-                    Err(TrySendError::Full(frame)) => {
-                        pending = frame;
-                        std::thread::sleep(Duration::from_millis(8));
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        log_info!("video_decode: receiver closed after {frames_sent} frames");
-                        return;
+                        Err(TrySendError::Full(frame)) => {
+                            pending = frame;
+                            std::thread::sleep(Duration::from_millis(4));
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            log_info!("video_decode: receiver closed after {frames_sent} frames");
+                            return Ok(());
+                        }
                     }
                 }
             }
+
+            Ok(())
+        });
+
+        if let Err(e) = result {
+            log_error!("video_decode failed for {}: {e}", path.display());
         }
     }
 

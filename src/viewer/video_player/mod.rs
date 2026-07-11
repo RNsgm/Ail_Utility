@@ -4,7 +4,7 @@ mod decoder;
 mod presenter;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use egui::{Context, TextureHandle};
 use crate::viewer::audio_player::AudioPlayer;
@@ -12,7 +12,7 @@ use crate::{log_info};
 
 use buffer::FrameBuffer;
 use clock::PlaybackClock;
-use decoder::{probe_duration, VideoDecoder};
+use decoder::{probe_duration, probe_fps, VideoDecoder};
 use presenter::{DecodedFrame, FramePresenter};
 
 /// Проигрыватель видео: master clock + декодер + буфер кадров + презентер + аудио.
@@ -25,6 +25,8 @@ pub struct VideoPlayer {
     awaiting_seek_frame: bool,
     stream_ended: bool,
     audio: Option<AudioPlayer>,
+    fps: f64,
+    last_presented: Option<Instant>,
     pub looping: bool,
     pub volume: f32,
 }
@@ -37,7 +39,8 @@ impl VideoPlayer {
             std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
         );
         let duration = probe_duration(&path);
-        log_info!("VideoPlayer: duration={duration:.3}s");
+        let fps = probe_fps(&path);
+        log_info!("VideoPlayer: duration={duration:.3}s fps={fps:.3}");
 
         let player = Self {
             path: path.clone(),
@@ -48,6 +51,8 @@ impl VideoPlayer {
             awaiting_seek_frame: true,
             stream_ended: false,
             audio: None,
+            fps,
+            last_presented: None,
             looping: false,
             volume: 1.0,
         };
@@ -57,11 +62,16 @@ impl VideoPlayer {
     }
 
     pub fn update(&mut self, ctx: &Context) -> Option<&TextureHandle> {
+        self.buffer.ingest(self.decoder.receiver());
+
         if self.awaiting_seek_frame {
-            if let Some(frame) = self.buffer.take_after_seek(self.decoder.receiver()) {
-                self.apply_frame(ctx, frame, true);
+            if let Some(frame) = self.buffer.take_latest() {
+                self.present_frame(ctx, frame);
                 self.awaiting_seek_frame = false;
                 self.stream_ended = false;
+                self.last_presented = Some(Instant::now());
+            } else if self.buffer.is_disconnected() {
+                self.awaiting_seek_frame = false;
             } else {
                 ctx.request_repaint();
                 return self.presenter.texture();
@@ -71,22 +81,24 @@ impl VideoPlayer {
         if !self.clock.is_paused() && !self.stream_ended {
             if self.looping && self.clock.reached_end() {
                 self.seek_to(ctx, 0.0);
-            } else if let Some(frame) = self.buffer.take_due(self.decoder.receiver(), self.clock.now()) {
-                self.apply_frame(ctx, frame, false);
+            } else if self.should_present_frame() {
+                if let Some(frame) = self.buffer.take_latest() {
+                    self.present_frame(ctx, frame);
+                    self.last_presented = Some(Instant::now());
+                }
             }
         }
 
-        self.schedule_repaint(ctx);
-
         if !self.clock.is_paused()
             && self.buffer.is_disconnected()
-            && self.buffer.next_pts().is_none()
+            && !self.buffer.has_frame()
             && !self.stream_ended
         {
             self.stream_ended = true;
             self.handle_end_of_stream(ctx);
         }
 
+        self.schedule_repaint(ctx);
         self.presenter.texture()
     }
 
@@ -142,16 +154,25 @@ impl VideoPlayer {
         self.clock.seek(target);
         self.awaiting_seek_frame = true;
         self.stream_ended = false;
+        self.last_presented = None;
         self.buffer.reset_disconnect();
 
         self.sync_audio(target, was_paused);
         ctx.request_repaint();
     }
 
-    fn apply_frame(&mut self, ctx: &Context, frame: DecodedFrame, sync_clock: bool) {
-        if sync_clock {
-            self.clock.seek(frame.pts);
-        }
+    fn should_present_frame(&self) -> bool {
+        let interval = self.frame_interval();
+        self.last_presented
+            .map(|t| t.elapsed() >= interval)
+            .unwrap_or(true)
+    }
+
+    fn frame_interval(&self) -> Duration {
+        Duration::from_secs_f64((1.0 / self.fps.max(1.0)).min(0.05))
+    }
+
+    fn present_frame(&mut self, ctx: &Context, frame: DecodedFrame) {
         self.presenter.show(ctx, frame);
         self.ensure_audio();
     }
@@ -197,16 +218,8 @@ impl VideoPlayer {
     fn schedule_repaint(&self, ctx: &Context) {
         if self.clock.is_paused() {
             ctx.request_repaint_after(Duration::from_millis(100));
-            return;
-        }
-
-        if let Some(next_pts) = self.buffer.next_pts() {
-            let wait = (next_pts - self.clock.now()).max(0.0);
-            ctx.request_repaint_after(Duration::from_secs_f64(wait.min(0.05)));
-        } else if self.buffer.is_disconnected() {
-            ctx.request_repaint_after(Duration::from_millis(100));
         } else {
-            ctx.request_repaint();
+            ctx.request_repaint_after(self.frame_interval());
         }
     }
 }

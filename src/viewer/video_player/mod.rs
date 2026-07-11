@@ -2,6 +2,7 @@ mod buffer;
 mod clock;
 mod decoder;
 mod presenter;
+mod sync;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -11,17 +12,14 @@ use crate::viewer::audio_player::AudioPlayer;
 use crate::{log_info};
 
 use buffer::{SharedFrameStore, READ_AHEAD_SECS};
-use clock::PlaybackClock;
-use decoder::{probe_duration, probe_fps, VideoDecoder};
+use decoder::{probe_av_offset, probe_duration, probe_fps, VideoDecoder};
 use presenter::{DecodedFrame, FramePresenter};
+use sync::AvSync;
 
-/// Сдвиг видео относительно аудио (сек). Отрицательный — видео раньше, положительный — позже.
-const AV_VIDEO_OFFSET_SECS: f64 = 0.0;
-
-/// Проигрыватель видео: clock + буфер на 30с + декодер + презентер + аудио.
+/// Проигрыватель видео: A/V sync + буфер на 30с + декодер + презентер.
 pub struct VideoPlayer {
     path: PathBuf,
-    clock: PlaybackClock,
+    sync: AvSync,
     decoder: VideoDecoder,
     store: SharedFrameStore,
     presenter: FramePresenter,
@@ -43,8 +41,9 @@ impl VideoPlayer {
         );
         let duration = probe_duration(&path);
         let fps = probe_fps(&path);
+        let av_offset = probe_av_offset(&path);
         log_info!(
-            "VideoPlayer: duration={duration:.3}s fps={fps:.3} read_ahead={READ_AHEAD_SECS}s"
+            "VideoPlayer: duration={duration:.3}s fps={fps:.3} av_offset={av_offset:.3}s read_ahead={READ_AHEAD_SECS}s"
         );
 
         let store = SharedFrameStore::new(fps);
@@ -52,7 +51,7 @@ impl VideoPlayer {
 
         let player = Self {
             path,
-            clock: PlaybackClock::new_paused(duration, 0.0),
+            sync: AvSync::new(duration, av_offset),
             decoder,
             store,
             presenter: FramePresenter::new(),
@@ -70,7 +69,7 @@ impl VideoPlayer {
     }
 
     pub fn update(&mut self, ctx: &Context) -> Option<&TextureHandle> {
-        let now = self.video_time();
+        let now = self.sync.video_position(self.audio.as_ref());
         let mut seek_to_start = false;
 
         {
@@ -90,8 +89,8 @@ impl VideoPlayer {
                     ctx.request_repaint();
                     return self.presenter.texture();
                 }
-            } else if !self.clock.is_paused() && !self.stream_ended {
-                if self.looping && self.clock.reached_end() {
+            } else if !self.sync.is_paused() && !self.stream_ended {
+                if self.looping && self.sync.reached_end() {
                     seek_to_start = true;
                 } else {
                     let mut frame_to_show = None;
@@ -118,14 +117,13 @@ impl VideoPlayer {
                 && store.is_empty()
                 && store.next_pts_after(self.displayed_pts).is_none()
         };
-        if !self.clock.is_paused() && ended && !self.stream_ended {
+        if !self.sync.is_paused() && ended && !self.stream_ended {
             self.stream_ended = true;
             self.handle_end_of_stream(ctx);
         }
 
         if !self.awaiting_seek_frame {
             self.ensure_audio();
-            self.sync_clock_to_master();
         }
 
         self.schedule_repaint(ctx);
@@ -133,7 +131,7 @@ impl VideoPlayer {
     }
 
     pub fn toggle_pause(&mut self) {
-        let paused = self.clock.toggle();
+        let paused = self.sync.toggle_pause();
         if let Some(audio) = &self.audio {
             if paused {
                 audio.pause();
@@ -144,19 +142,19 @@ impl VideoPlayer {
     }
 
     pub fn is_playing(&self) -> bool {
-        !self.clock.is_paused()
+        !self.sync.is_paused()
     }
 
     pub fn is_paused(&self) -> bool {
-        self.clock.is_paused()
+        self.sync.is_paused()
     }
 
     pub fn elapsed(&self) -> f64 {
-        self.master_time()
+        self.sync.position(self.audio.as_ref())
     }
 
     pub fn duration(&self) -> f64 {
-        self.clock.duration()
+        self.sync.duration()
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -167,13 +165,13 @@ impl VideoPlayer {
     }
 
     pub fn seek_relative(&mut self, ctx: &Context, delta: f64) {
-        let target = self.clock.clamp_target(self.clock.now() + delta);
+        let target = self.sync.clamp_target(self.sync.position(self.audio.as_ref()) + delta);
         self.seek_to(ctx, target);
     }
 
     pub fn seek_to(&mut self, ctx: &Context, target: f64) {
-        let target = self.clock.clamp_target(target);
-        let was_paused = self.clock.is_paused();
+        let target = self.sync.clamp_target(target);
+        let was_paused = self.sync.is_paused();
 
         log_info!("VideoPlayer::seek_to {target:.3}s file={}", self.path.display());
 
@@ -181,13 +179,13 @@ impl VideoPlayer {
         self.store.lock().clear();
 
         self.decoder = VideoDecoder::start(self.path.clone(), target, self.store.clone());
-        self.clock.seek(target);
-        self.clock.pause();
+        self.sync.seek(target);
+        self.sync.pause();
         self.awaiting_seek_frame = true;
         self.stream_ended = false;
         self.displayed_pts = target - 0.001;
 
-        self.sync_audio(target, was_paused);
+        self.restart_audio(target, was_paused);
         ctx.request_repaint();
     }
 
@@ -195,31 +193,6 @@ impl VideoPlayer {
         let pts = frame.pts;
         self.displayed_pts = pts;
         self.presenter.show(ctx, frame);
-        if self.audio.is_none() {
-            self.clock.seek(pts);
-        }
-    }
-
-    fn video_time(&self) -> f64 {
-        (self.master_time() + AV_VIDEO_OFFSET_SECS).max(0.0)
-    }
-
-    fn master_time(&self) -> f64 {
-        if let Some(audio) = &self.audio {
-            audio.playback_time()
-        } else {
-            self.clock.now()
-        }
-    }
-
-    fn sync_clock_to_master(&mut self) {
-        if self.audio.is_none() {
-            return;
-        }
-        let t = self.master_time();
-        if (t - self.clock.now()).abs() > 0.02 {
-            self.clock.seek(t);
-        }
     }
 
     fn ensure_audio(&mut self) {
@@ -233,53 +206,51 @@ impl VideoPlayer {
         }
 
         let start = self.displayed_pts.max(0.0);
-        self.clock.pause();
+        self.sync.pause();
 
         let Some(audio) = AudioPlayer::start(self.path.clone(), start) else {
-            self.clock.resume();
+            self.sync.begin_at(start);
             return;
         };
         audio.set_volume(self.volume);
 
-        self.clock.seek(start);
-        self.clock.resume();
         self.audio = Some(audio);
+        self.sync.begin_at(start);
     }
 
-    fn sync_audio(&mut self, target: f64, was_paused: bool) {
+    fn restart_audio(&mut self, target: f64, was_paused: bool) {
         if let Some(audio) = &mut self.audio {
-            self.clock.pause();
+            self.sync.pause();
             audio.restart(self.path.clone(), target);
             audio.set_volume(self.volume);
-            self.clock.seek(target);
             if was_paused {
                 audio.pause();
-                self.clock.pause();
+                self.sync.pause();
             } else {
                 audio.resume();
-                self.clock.resume();
+                self.sync.begin_at(target);
             }
         }
     }
 
     fn handle_end_of_stream(&mut self, ctx: &Context) {
-        if self.looping && self.clock.duration() > 0.0 {
+        if self.looping && self.sync.duration() > 0.0 {
             self.seek_to(ctx, 0.0);
             return;
         }
-        self.clock.pause();
+        self.sync.pause();
         if let Some(audio) = &self.audio {
             audio.pause();
         }
     }
 
     fn schedule_repaint(&self, ctx: &Context) {
-        if self.clock.is_paused() {
+        if self.sync.is_paused() {
             ctx.request_repaint_after(Duration::from_millis(100));
             return;
         }
 
-        let now = self.video_time();
+        let now = self.sync.video_position(self.audio.as_ref());
         let frame_step = 1.0 / self.fps.max(1.0);
         let store = self.store.lock();
         if let Some(next_pts) = store.next_pts_after(self.displayed_pts) {

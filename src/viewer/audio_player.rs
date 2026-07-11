@@ -19,7 +19,8 @@ pub struct AudioPlayer {
     volume: Arc<AtomicU32>,
     buffer: Arc<Mutex<VecDeque<f32>>>,
     samples_played: Arc<AtomicU64>,
-    start_pts: f64,
+    /// PTS (сек) самого старого сэмпла в буфере, f64::to_bits().
+    timeline_pts: Arc<AtomicU64>,
     sample_rate: u32,
     channels: usize,
     _stream: cpal::Stream,
@@ -37,6 +38,8 @@ impl AudioPlayer {
         let buffer_cb = buffer.clone();
         let samples_played = Arc::new(AtomicU64::new(0));
         let samples_cb = samples_played.clone();
+        let timeline_pts = Arc::new(AtomicU64::new(start_time.to_bits()));
+        let timeline_decode = timeline_pts.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let volume = Arc::new(AtomicU32::new(1000));
         let volume_cb = volume.clone();
@@ -71,12 +74,12 @@ impl AudioPlayer {
             volume,
             buffer: buffer.clone(),
             samples_played,
-            start_pts: start_time,
+            timeline_pts,
             sample_rate,
             channels,
             _stream: stream,
         };
-        player.spawn_decode(path, start_time);
+        player.spawn_decode(path, start_time, timeline_decode);
         player.wait_prefill();
         player._stream.play().ok()?;
         Some(player)
@@ -100,12 +103,13 @@ impl AudioPlayer {
     }
 
     pub fn playback_time(&self) -> f64 {
+        let origin = f64::from_bits(self.timeline_pts.load(Ordering::Relaxed));
         let samples = self.samples_played.load(Ordering::Relaxed) as f64;
         let rate = self.sample_rate as f64 * self.channels as f64;
         if rate <= 0.0 {
-            return self.start_pts;
+            return origin;
         }
-        self.start_pts + samples / rate
+        origin + samples / rate
     }
 
     pub fn restart(&mut self, path: PathBuf, start_time: f64) {
@@ -114,10 +118,12 @@ impl AudioPlayer {
             guard.clear();
         }
         self.samples_played.store(0, Ordering::Relaxed);
-        self.start_pts = start_time;
+        self.timeline_pts
+            .store(start_time.to_bits(), Ordering::Relaxed);
         let _ = self._stream.pause();
         self.cancel = Arc::new(AtomicBool::new(false));
-        self.spawn_decode(path, start_time);
+        let timeline_decode = self.timeline_pts.clone();
+        self.spawn_decode(path, start_time, timeline_decode);
         self.wait_prefill();
         let _ = self._stream.play();
     }
@@ -142,7 +148,12 @@ impl AudioPlayer {
         }
     }
 
-    fn spawn_decode(&self, path: PathBuf, start_time: f64) {
+    fn spawn_decode(
+        &self,
+        path: PathBuf,
+        start_time: f64,
+        timeline_pts: Arc<AtomicU64>,
+    ) {
         log_info!(
             "AudioPlayer: decode {} @ {start_time:.3}s",
             path.display()
@@ -159,6 +170,7 @@ impl AudioPlayer {
                 sample_rate,
                 channels,
                 buffer,
+                timeline_pts,
                 cancel,
             );
         });
@@ -180,6 +192,7 @@ struct AudioDecoderState {
     stream_index: usize,
     decoder: ffmpeg_next::decoder::Audio,
     resampler: ffmpeg_next::software::resampling::Context,
+    time_base: ffmpeg_next::util::rational::Rational,
     out_channels: usize,
 }
 
@@ -203,6 +216,7 @@ impl AudioDecoderState {
         let stream = input
             .stream(stream_index)
             .ok_or_else(|| "Missing audio stream".to_string())?;
+        let time_base = stream.time_base();
         let decoder_ctx = codec::context::Context::from_parameters(stream.parameters())
             .map_err(|e| e.to_string())?;
         let mut decoder = decoder_ctx.decoder().audio().map_err(|e| e.to_string())?;
@@ -237,18 +251,26 @@ impl AudioDecoderState {
             stream_index,
             decoder,
             resampler,
+            time_base,
             out_channels: out_channels as usize,
         })
     }
 
-    fn decode_chunk(&mut self) -> Result<Option<Vec<f32>>, String> {
+    fn frame_pts(&self, decoded: &ffmpeg_next::frame::Audio) -> Option<f64> {
+        decoded
+            .pts()
+            .map(|ts| ts_to_seconds(ts, self.time_base))
+    }
+
+    fn decode_chunk(&mut self) -> Result<Option<(f64, Vec<f32>)>, String> {
         use ffmpeg_next::{frame, Error, Packet};
 
         loop {
             let mut decoded = frame::Audio::empty();
             while self.decoder.receive_frame(&mut decoded).is_ok() {
                 if let Some(samples) = self.convert_frame(&decoded)? {
-                    return Ok(Some(samples));
+                    let pts = self.frame_pts(&decoded).unwrap_or(0.0);
+                    return Ok(Some((pts, samples)));
                 }
                 decoded = frame::Audio::empty();
             }
@@ -272,20 +294,24 @@ impl AudioDecoderState {
         }
     }
 
-    fn decode_batch(&mut self, max_samples: usize) -> Result<Option<Vec<f32>>, String> {
+    fn decode_batch(&mut self, max_samples: usize) -> Result<Option<(f64, Vec<f32>)>, String> {
         let mut batch = Vec::with_capacity(max_samples.min(16_384));
+        let mut batch_pts = None;
 
         while batch.len() < max_samples {
-            let Some(chunk) = self.decode_chunk()? else {
+            let Some((pts, chunk)) = self.decode_chunk()? else {
                 break;
             };
+            if batch_pts.is_none() {
+                batch_pts = Some(pts);
+            }
             batch.extend(chunk);
         }
 
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(batch))
+            Ok(Some((batch_pts.unwrap_or(0.0), batch)))
         }
     }
 
@@ -318,12 +344,18 @@ impl AudioDecoderState {
 }
 
 #[cfg(feature = "ffmpeg")]
+fn ts_to_seconds(ts: i64, time_base: ffmpeg_next::util::rational::Rational) -> f64 {
+    ts as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator())
+}
+
+#[cfg(feature = "ffmpeg")]
 fn decode_audio_to_buffer(
     path: &PathBuf,
     start_time: f64,
     sample_rate: u32,
     channels: usize,
     buffer: Arc<Mutex<VecDeque<f32>>>,
+    timeline_pts: Arc<AtomicU64>,
     cancel: Arc<AtomicBool>,
 ) {
     let mut decoder = match crate::ffmpeg_util::with_ffmpeg(|| {
@@ -365,16 +397,26 @@ fn decode_audio_to_buffer(
             }
         };
 
-        let Some(samples) = batch else {
+        let Some((pts, samples)) = batch else {
             break;
         };
 
+        if pts + 0.04 < start_time {
+            continue;
+        }
+
         if let Ok(mut guard) = buffer.lock() {
+            if guard.is_empty() {
+                timeline_pts.store(pts.to_bits(), Ordering::Relaxed);
+            }
             for sample in samples {
                 guard.push_back(sample);
             }
+            let sample_dt = 1.0 / (sample_rate as f64 * channels as f64);
             while guard.len() > AUDIO_BUFFER_SAMPLES {
                 guard.pop_front();
+                let current = f64::from_bits(timeline_pts.load(Ordering::Relaxed));
+                timeline_pts.store((current + sample_dt).to_bits(), Ordering::Relaxed);
             }
         }
     }
@@ -387,6 +429,7 @@ fn decode_audio_to_buffer(
     _sample_rate: u32,
     _channels: usize,
     _buffer: Arc<Mutex<VecDeque<f32>>>,
+    _timeline_pts: Arc<AtomicU64>,
     _cancel: Arc<AtomicBool>,
 ) {
 }

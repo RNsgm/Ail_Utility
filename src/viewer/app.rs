@@ -68,7 +68,7 @@ impl eframe::App for ViewerApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::panel())
-                    .inner_margin(egui::Margin::symmetric(12, 16))
+                    .inner_margin(egui::Margin::symmetric(16, 20))
                     .stroke(egui::Stroke::new(1.0, theme::border())),
             )
             .show_inside(ui, |ui| {

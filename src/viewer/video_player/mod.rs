@@ -183,10 +183,11 @@ impl VideoPlayer {
     }
 
     fn display_frame(&mut self, ctx: &Context, frame: DecodedFrame) {
-        self.displayed_pts = frame.pts;
+        let pts = frame.pts;
+        self.displayed_pts = pts;
         self.presenter.show(ctx, frame);
         if self.audio.is_none() {
-            self.clock.seek(frame.pts);
+            self.clock.seek(pts);
         }
     }
 

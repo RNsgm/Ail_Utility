@@ -260,7 +260,7 @@ impl GalleryView {
 
     fn render_thumbnail(
         &mut self,
-        ctx: &Context,
+        _ctx: &Context,
         ui: &mut Ui,
         index: usize,
         path: &PathBuf,

@@ -42,11 +42,13 @@ impl ViewerApp {
 }
 
 impl eframe::App for ViewerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         egui::Panel::left("nav_panel")
             .resizable(false)
-            .default_width(160.0)
-            .show(ctx, |ui| {
+            .default_size(160.0)
+            .show(&ctx, |ui| {
                 ui.heading("AIL Tool");
                 ui.add_space(10.0);
 
@@ -66,29 +68,27 @@ impl eframe::App for ViewerApp {
 
         match self.mode {
             AppMode::Gallery => {
-                egui::CentralPanel::default().show_inside(ctx, |ui| {
-                    let response = self.gallery.ui(ctx, ui);
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    let response = self.gallery.ui(&ctx, ui);
 
                     if let Some(path) = response.clicked_file {
-                        self.reader.open_file(ctx, path);
+                        self.reader.open_file(&ctx, path);
                         self.mode = AppMode::Reader;
                     }
                 });
             }
             AppMode::Reader => {
-                egui::CentralPanel::default().show_inside(ctx, |ui| {
-                    let response = self.reader.ui(ctx, ui);
+                let response = self.reader.ui(&ctx, ui);
 
-                    if response.close_requested {
-                        self.reader.close();
-                        self.gallery.clear_selection();
-                        self.mode = AppMode::Gallery;
-                    }
-                });
+                if response.close_requested {
+                    self.reader.close();
+                    self.gallery.clear_selection();
+                    self.mode = AppMode::Gallery;
+                }
             }
             AppMode::Encoder => {
-                egui::CentralPanel::default().show_inside(ctx, |ui| {
-                    self.encoder.ui(ctx, ui);
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    self.encoder.ui(&ctx, ui);
                 });
             }
         }

@@ -1,4 +1,4 @@
-use crate::decoder::AilDecoder;
+﻿use crate::decoder::AilDecoder;
 use crate::encoder::MediaType;
 use crate::viewer::texture_loader::{
     load_color_images_from_memory, load_gif_color_images, GifFrame, TextureCache,
@@ -327,7 +327,7 @@ impl ReaderView {
         self.handle_input(ctx, &mut response);
 
         if self.total_pages == 0 && self.load_receiver.is_none() {
-            egui::CentralPanel::default().show_inside(ctx, |ui| {
+            egui::CentralPanel::default().show(ctx, |ui| {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new("Нет открытого файла").size(24.0));
                 });
@@ -345,7 +345,7 @@ impl ReaderView {
             .to_string();
 
         if self.show_ui {
-            egui::Panel::top("reader_top").show_inside(ctx, |ui| {
+            egui::Panel::top("reader_top").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("<- Назад").clicked() {
                         response.close_requested = true;
@@ -392,7 +392,7 @@ impl ReaderView {
                 });
             });
 
-            egui::Panel::bottom("reader_bottom").show_inside(ctx, |ui| {
+            egui::Panel::bottom("reader_bottom").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Страница:");
                     let mut page = self.current_page + 1;
@@ -426,7 +426,7 @@ impl ReaderView {
         let mode = self.mode;
         let zoom = self.zoom_level;
 
-        egui::CentralPanel::default().show_inside(ctx, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| {
             let scroll_delta = ctx.input(|i| {
                 let mut delta = 0.0;
                 if i.key_down(Key::ArrowDown) {

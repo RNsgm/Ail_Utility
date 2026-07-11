@@ -68,7 +68,7 @@ impl eframe::App for ViewerApp {
                     self.mode = AppMode::Encoder;
                 }
                 if ui
-                    .selectable_label(self.mode == AppMode::Converter, "🎬 TS → MP4")
+                    .selectable_label(self.mode == AppMode::Converter, "🎬 TTS → MP4")
                     .clicked()
                 {
                     self.mode = AppMode::Converter;

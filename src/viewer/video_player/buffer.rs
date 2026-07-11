@@ -47,6 +47,24 @@ impl FrameBuffer {
         self.latest.take()
     }
 
+    /// Взять последний кадр, если его PTS уже наступил по master clock.
+    pub fn take_due(&mut self, clock: f64) -> Option<DecodedFrame> {
+        let due = self
+            .latest
+            .as_ref()
+            .map(|frame| frame.pts <= clock + 0.001)
+            .unwrap_or(false);
+        if due {
+            self.latest.take()
+        } else {
+            None
+        }
+    }
+
+    pub fn next_pts(&self) -> Option<f64> {
+        self.latest.as_ref().map(|frame| frame.pts)
+    }
+
     pub fn has_frame(&self) -> bool {
         self.latest.is_some()
     }

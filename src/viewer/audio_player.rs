@@ -14,6 +14,9 @@ const AUDIO_AHEAD_SECS: f64 = 1.5;
 /// Don't start speakers until at least this much audio is buffered.
 const AUDIO_PREFILL_SECS: f64 = 0.25;
 
+/// Typical WASAPI/cpal output queue depth when buffer size is unknown.
+const DEFAULT_OUTPUT_LATENCY_SECS: f64 = 0.2;
+
 pub struct AudioPlayer {
     cancel: Arc<AtomicBool>,
     volume: Arc<AtomicU32>,
@@ -23,6 +26,8 @@ pub struct AudioPlayer {
     timeline_pts: Arc<AtomicU64>,
     sample_rate: u32,
     channels: usize,
+    /// Задержка между подачей сэмпла в cpal и звуком в колонках.
+    output_latency_secs: f64,
     _stream: cpal::Stream,
 }
 
@@ -33,6 +38,8 @@ impl AudioPlayer {
         let config = device.default_output_config().ok()?;
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
+        let output_latency_secs = estimate_output_latency_secs(&config);
+        log_info!("AudioPlayer: output_latency={output_latency_secs:.3}s");
 
         let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(AUDIO_BUFFER_SAMPLES)));
         let buffer_cb = buffer.clone();
@@ -77,6 +84,7 @@ impl AudioPlayer {
             timeline_pts,
             sample_rate,
             channels,
+            output_latency_secs,
             _stream: stream,
         };
         player.spawn_decode(path, start_time, timeline_decode);
@@ -103,6 +111,19 @@ impl AudioPlayer {
     }
 
     pub fn playback_time(&self) -> f64 {
+        self.stream_position()
+    }
+
+    /// Позиция звука, который пользователь слышит сейчас (с учётом буфера DAC).
+    pub fn heard_time(&self) -> f64 {
+        (self.stream_position() - self.output_latency_secs).max(0.0)
+    }
+
+    pub fn output_latency_secs(&self) -> f64 {
+        self.output_latency_secs
+    }
+
+    fn stream_position(&self) -> f64 {
         let origin = f64::from_bits(self.timeline_pts.load(Ordering::Relaxed));
         let samples = self.samples_played.load(Ordering::Relaxed) as f64;
         let rate = self.sample_rate as f64 * self.channels as f64;
@@ -183,6 +204,21 @@ impl Drop for AudioPlayer {
         if let Ok(mut buffer) = self.buffer.lock() {
             buffer.clear();
         }
+    }
+}
+
+fn estimate_output_latency_secs(config: &cpal::SupportedStreamConfig) -> f64 {
+    let rate = config.sample_rate().0 as f64;
+    let period_secs = match config.buffer_size() {
+        cpal::BufferSize::Fixed(frames) => frames as f64 / rate,
+        cpal::BufferSize::Range { max, .. } => max as f64 / rate,
+        cpal::BufferSize::Default => 0.0,
+    };
+    if period_secs > 0.0 {
+        // WASAPI обычно держит 2–4 периода в очереди до ЦАП.
+        (period_secs * 3.0).clamp(0.08, 0.35)
+    } else {
+        DEFAULT_OUTPUT_LATENCY_SECS
     }
 }
 

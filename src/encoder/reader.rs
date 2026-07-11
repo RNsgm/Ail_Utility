@@ -263,7 +263,10 @@ fn read_rar_entries(
 }
 
 #[cfg(not(feature = "unrar"))]
-fn read_rar_archive<P: AsRef<Path>>(_path: P, _images: &mut Vec<(String, Vec<u8>)>) -> Result<(), EncoderError> {
+fn read_rar_archive<P: AsRef<Path>>(
+    _path: P,
+    _images: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), EncoderError> {
     Err(EncoderError::Rar(
         "RAR support requires building with the unrar feature".to_string(),
     ))

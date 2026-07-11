@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::encoder::format::{
     index_offset_from_header, read_index_entries, AilEntry, AilHeader, CompressionType,
 };
-use crate::encoder::{EncoderError};
+use crate::encoder::EncoderError;
 
 /// Декодированный .ail файл
 pub struct AilDecoder {

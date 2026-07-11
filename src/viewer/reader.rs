@@ -280,7 +280,7 @@ impl ReaderView {
         self.gif_current_frame = 0;
     }
 
-    pub fn ui(&mut self, ctx: &Context, _ui: &mut Ui) -> ReaderResponse {
+    pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) -> ReaderResponse {
         let mut response = ReaderResponse::default();
         let mut should_update_queue = false;
 
@@ -340,10 +340,8 @@ impl ReaderView {
         self.handle_input(ctx, &mut response);
 
         if self.total_pages == 0 && self.load_receiver.is_none() {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Нет открытого файла").size(24.0));
-                });
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("Нет открытого файла").size(24.0));
             });
             return response;
         }
@@ -358,7 +356,7 @@ impl ReaderView {
             .to_string();
 
         if self.show_ui {
-            egui::Panel::top("reader_top").show(ctx, |ui| {
+            egui::Panel::top("reader_top").show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("<- Назад").clicked() {
                         response.close_requested = true;
@@ -405,7 +403,7 @@ impl ReaderView {
                 });
             });
 
-            egui::Panel::bottom("reader_bottom").show(ctx, |ui| {
+            egui::Panel::bottom("reader_bottom").show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Страница:");
                     let mut page = self.current_page + 1;
@@ -439,30 +437,28 @@ impl ReaderView {
         let mode = self.mode;
         let zoom = self.zoom_level;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let scroll_delta = ctx.input(|i| {
-                let mut delta = 0.0;
-                if i.key_down(Key::ArrowDown) {
-                    delta -= 20.0;
-                }
-                if i.key_down(Key::ArrowUp) {
-                    delta += 20.0;
-                }
-                if i.key_pressed(Key::PageDown) {
-                    delta -= 500.0;
-                }
-                if i.key_pressed(Key::PageUp) {
-                    delta += 500.0;
-                }
-                delta
-            });
-
-            if scroll_delta != 0.0 {
-                ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
+        let scroll_delta = ctx.input(|i| {
+            let mut delta = 0.0;
+            if i.key_down(Key::ArrowDown) {
+                delta -= 20.0;
             }
-
-            self.render_media(ctx, ui, current_page, mode, zoom);
+            if i.key_down(Key::ArrowUp) {
+                delta += 20.0;
+            }
+            if i.key_pressed(Key::PageDown) {
+                delta -= 500.0;
+            }
+            if i.key_pressed(Key::PageUp) {
+                delta += 500.0;
+            }
+            delta
         });
+
+        if scroll_delta != 0.0 {
+            ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
+        }
+
+        self.render_media(ctx, ui, current_page, mode, zoom);
 
         response
     }

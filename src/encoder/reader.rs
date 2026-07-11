@@ -558,8 +558,8 @@ fn encode_video_file_to_ail(
     };
 
     let mut builder = AilBuilder::new().with_thumbnail_size(options.thumbnail_size);
-    builder.add_video_blob(name, data, options.compression)?;
     log_info!("encode_video: built blob name={name}");
+    builder.add_video_blob(name, data, options.compression)?;
 
     let output_file = File::create(output_path)?;
     let mut writer = std::io::BufWriter::new(output_file);

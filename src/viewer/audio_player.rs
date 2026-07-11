@@ -126,26 +126,26 @@ impl Drop for AudioPlayer {
 }
 
 #[cfg(feature = "ffmpeg")]
-fn decode_audio_to_buffer(
-    path: &PathBuf,
-    start_time: f64,
-    sample_rate: u32,
-    channels: usize,
-    buffer: Arc<Mutex<VecDeque<f32>>>,
-    cancel: Arc<AtomicBool>,
-) {
-    use ffmpeg_next::{codec, format, frame, media, software::resampling, util::format::Sample};
-    use ffmpeg_next::util::format::sample::Type;
+struct AudioDecoderState {
+    input: ffmpeg_next::format::context::Input,
+    stream_index: usize,
+    decoder: ffmpeg_next::decoder::Audio,
+    resampler: ffmpeg_next::software::resampling::Context,
+    out_channels: usize,
+}
 
-    let result = crate::ffmpeg_util::with_ffmpeg(|| {
+#[cfg(feature = "ffmpeg")]
+impl AudioDecoderState {
+    fn open(path: &PathBuf, start_time: f64, sample_rate: u32, channels: usize) -> Result<Self, String> {
+        use ffmpeg_next::{codec, format, media, software::resampling, util::format::Sample};
+        use ffmpeg_next::util::format::sample::Type;
+
         let mut input = format::input(path).map_err(|e| e.to_string())?;
-
         let stream_index = input
             .streams()
             .best(media::Type::Audio)
             .ok_or_else(|| "No audio stream".to_string())?
             .index();
-
         let stream = input
             .stream(stream_index)
             .ok_or_else(|| "Missing audio stream".to_string())?;
@@ -163,8 +163,7 @@ fn decode_audio_to_buffer(
 
         let out_layout = ffmpeg_next::util::channel_layout::ChannelLayout::STEREO;
         let out_channels = channels.max(2) as u16;
-
-        let mut resampler = resampling::Context::get(
+        let resampler = resampling::Context::get(
             decoder.format(),
             decoder.channel_layout(),
             decoder.rate(),
@@ -174,73 +173,127 @@ fn decode_audio_to_buffer(
         )
         .map_err(|e| e.to_string())?;
 
-        for (stream, packet) in input.packets() {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            if stream.index() != stream_index {
-                continue;
-            }
+        Ok(Self {
+            input,
+            stream_index,
+            decoder,
+            resampler,
+            out_channels: out_channels as usize,
+        })
+    }
 
-            if decoder.send_packet(&packet).is_err() {
-                continue;
-            }
+    fn decode_chunk(&mut self) -> Result<Option<Vec<f32>>, String> {
+        use ffmpeg_next::{frame, Error, Packet};
 
+        loop {
             let mut decoded = frame::Audio::empty();
-            while decoder.receive_frame(&mut decoded).is_ok() {
-                if cancel.load(Ordering::Relaxed) {
-                    return Ok(());
+            while self.decoder.receive_frame(&mut decoded).is_ok() {
+                if let Some(samples) = self.convert_frame(&decoded)? {
+                    return Ok(Some(samples));
                 }
+                decoded = frame::Audio::empty();
+            }
 
-                let mut converted = frame::Audio::empty();
-                if resampler.run(&decoded, &mut converted).is_err() {
-                    continue;
+            let mut packet = Packet::empty();
+            loop {
+                match packet.read(&mut self.input) {
+                    Ok(()) => break,
+                    Err(Error::Eof) => return Ok(None),
+                    Err(_) => continue,
                 }
+            }
 
-                let sample_count = converted.samples();
-                let ch = out_channels as usize;
-                let byte_len = sample_count * ch * 4;
-                let data = converted.data(0);
-                if data.len() < byte_len {
-                    continue;
-                }
+            if packet.stream() != self.stream_index {
+                continue;
+            }
 
-                let mut samples = Vec::with_capacity(sample_count * ch);
-                for chunk in data[..byte_len].chunks_exact(4) {
-                    samples.push(f32::from_le_bytes([
-                        chunk[0], chunk[1], chunk[2], chunk[3],
-                    ]));
-                }
-
-                if let Ok(mut guard) = buffer.lock() {
-                    let max_ahead =
-                        (sample_rate as f64 * channels as f64 * AUDIO_AHEAD_SECS) as usize;
-                    while guard.len() >= max_ahead {
-                        drop(guard);
-                        if cancel.load(Ordering::Relaxed) {
-                            return Ok(());
-                        }
-                        std::thread::sleep(Duration::from_millis(8));
-                        guard = buffer
-                            .lock()
-                            .map_err(|_| "audio buffer lock poisoned".to_string())?;
-                    }
-
-                    for s in samples {
-                        if guard.len() >= AUDIO_BUFFER_SAMPLES {
-                            guard.pop_front();
-                        }
-                        guard.push_back(s);
-                    }
-                }
+            if self.decoder.send_packet(&packet).is_err() {
+                continue;
             }
         }
+    }
 
-        Ok(())
-    });
+    fn convert_frame(&mut self, decoded: &ffmpeg_next::frame::Audio) -> Result<Option<Vec<f32>>, String> {
+        let mut converted = ffmpeg_next::frame::Audio::empty();
+        if self.resampler.run(decoded, &mut converted).is_err() {
+            return Ok(None);
+        }
 
-    if let Err(e) = result {
-        log_error!("decode_audio_to_buffer failed for {}: {e}", path.display());
+        let sample_count = converted.samples();
+        let ch = self.out_channels;
+        let byte_len = sample_count * ch * 4;
+        let data = converted.data(0);
+        if data.len() < byte_len {
+            return Ok(None);
+        }
+
+        let mut samples = Vec::with_capacity(sample_count * ch);
+        for chunk in data[..byte_len].chunks_exact(4) {
+            samples.push(f32::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3],
+            ]));
+        }
+
+        Ok(Some(samples))
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn decode_audio_to_buffer(
+    path: &PathBuf,
+    start_time: f64,
+    sample_rate: u32,
+    channels: usize,
+    buffer: Arc<Mutex<VecDeque<f32>>>,
+    cancel: Arc<AtomicBool>,
+) {
+    let mut decoder = match crate::ffmpeg_util::with_ffmpeg(|| {
+        AudioDecoderState::open(path, start_time, sample_rate, channels)
+    }) {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            log_error!("audio decode open failed for {}: {e}", path.display());
+            return;
+        }
+    };
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let max_ahead = (sample_rate as f64 * channels as f64 * AUDIO_AHEAD_SECS) as usize;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let ahead = buffer.lock().map(|guard| guard.len()).unwrap_or(max_ahead);
+            if ahead < max_ahead {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(8));
+        }
+
+        let chunk = match crate::ffmpeg_util::with_ffmpeg(|| decoder.decode_chunk()) {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                log_error!("audio decode chunk failed for {}: {e}", path.display());
+                break;
+            }
+        };
+
+        let Some(samples) = chunk else {
+            break;
+        };
+
+        if let Ok(mut guard) = buffer.lock() {
+            for sample in samples {
+                if guard.len() >= AUDIO_BUFFER_SAMPLES {
+                    guard.pop_front();
+                }
+                guard.push_back(sample);
+            }
+        }
     }
 }
 

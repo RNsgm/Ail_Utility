@@ -53,7 +53,7 @@ impl AudioPlayer {
                     for sample in data.iter_mut() {
                         if let Some(v) = guard.pop_front() {
                             samples_cb.fetch_add(1, Ordering::Relaxed);
-                            *sample = (v * vol).clamp(-1.0, 1.0);
+                            *sample = (v * vol).clamp(-1.0_f32, 1.0);
                         } else {
                             *sample = 0.0;
                         }

@@ -210,9 +210,8 @@ impl Drop for AudioPlayer {
 fn estimate_output_latency_secs(config: &cpal::SupportedStreamConfig) -> f64 {
     let rate = config.sample_rate().0 as f64;
     let period_secs = match config.buffer_size() {
-        cpal::BufferSize::Fixed(frames) => frames as f64 / rate,
-        cpal::BufferSize::Range { max, .. } => max as f64 / rate,
-        cpal::BufferSize::Default => 0.0,
+        cpal::SupportedBufferSize::Range { max, .. } => *max as f64 / rate,
+        cpal::SupportedBufferSize::Unknown => 0.0,
     };
     if period_secs > 0.0 {
         // WASAPI обычно держит 2–4 периода в очереди до ЦАП.

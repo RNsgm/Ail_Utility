@@ -222,6 +222,7 @@ impl VideoPlayer {
         self.clock.pause();
 
         let Some(audio) = AudioPlayer::start(self.path.clone(), start) else {
+            self.clock.resume();
             return;
         };
         audio.set_volume(self.volume);

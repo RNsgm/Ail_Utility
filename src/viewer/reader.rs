@@ -629,10 +629,11 @@ impl ReaderView {
             return;
         };
 
-        let elapsed = player.elapsed().clamp(0.0, player.duration);
+        let elapsed = player.elapsed().clamp(0.0, player.duration());
         let mut seek_target = None;
         let mut volume = player.volume;
         let panel_width = ui.available_width();
+        let duration = player.duration();
 
         ui.set_width(panel_width);
         ui.vertical(|ui| {
@@ -640,7 +641,7 @@ impl ReaderView {
                 ui.add_space(10.0);
 
                 if ui
-                    .button(if player.is_paused { "▶" } else { "⏸" })
+                    .button(if player.is_paused() { "▶" } else { "⏸" })
                     .clicked()
                 {
                     player.toggle_pause();
@@ -658,7 +659,7 @@ impl ReaderView {
                     RichText::new(format!(
                         "{} / {}",
                         fmt_time(elapsed),
-                        fmt_time(player.duration)
+                        fmt_time(duration)
                     ))
                     .monospace()
                     .color(theme::text_muted()),
@@ -692,7 +693,7 @@ impl ReaderView {
             let mut slider_val = self.video_scrub_time.unwrap_or(elapsed);
             theme::with_slider_width(ui, ui.available_width(), |ui| {
                 let resp = ui.add(
-                    egui::Slider::new(&mut slider_val, 0.0..=player.duration.max(0.001))
+                    egui::Slider::new(&mut slider_val, 0.0..=duration.max(0.001))
                         .show_value(false)
                         .trailing_fill(true),
                 );
@@ -846,7 +847,7 @@ impl ReaderView {
                     player.seek_to(ctx, 0.0);
                 }
                 if ctx.input(|i| i.key_pressed(Key::End)) {
-                    player.seek_to(ctx, player.duration);
+                    player.seek_to(ctx, player.duration());
                 }
             }
         } else {

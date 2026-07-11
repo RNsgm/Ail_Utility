@@ -666,6 +666,11 @@ impl ReaderView {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("← → ±5с · Space")
+                            .size(10.0)
+                            .color(theme::text_muted()),
+                    );
                     theme::with_slider_width(ui, 96.0, |ui| {
                         if ui
                             .add(
@@ -820,17 +825,44 @@ impl ReaderView {
     }
 
     fn handle_input(&mut self, ctx: &Context, response: &mut ReaderResponse) {
+        let video_active = self.video_player.is_some();
+
         if ctx.input(|i| i.key_pressed(Key::Space)) {
             if let Some(player) = self.video_player.as_mut() {
                 player.toggle_pause();
             }
         }
-        if ctx.input(|i| i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D)) {
-            self.next_page();
+
+        if video_active {
+            if let Some(player) = self.video_player.as_mut() {
+                if ctx.input(|i| i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D)) {
+                    player.seek_relative(ctx, 5.0);
+                }
+                if ctx.input(|i| i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::A)) {
+                    player.seek_relative(ctx, -5.0);
+                }
+                if ctx.input(|i| i.key_pressed(Key::Home)) {
+                    player.seek_to(ctx, 0.0);
+                }
+                if ctx.input(|i| i.key_pressed(Key::End)) {
+                    player.seek_to(ctx, player.duration);
+                }
+            }
+        } else {
+            if ctx.input(|i| i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D)) {
+                self.next_page();
+            }
+            if ctx.input(|i| i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::A)) {
+                self.prev_page();
+            }
+            if ctx.input(|i| i.key_pressed(Key::Home)) {
+                self.go_to_page(0);
+            }
+            if ctx.input(|i| i.key_pressed(Key::End)) {
+                self.go_to_page(self.total_pages.saturating_sub(1));
+            }
         }
-        if ctx.input(|i| i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::A)) {
-            self.prev_page();
-        }
+
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             response.close_requested = true;
         }
@@ -850,12 +882,6 @@ impl ReaderView {
         if ctx.input(|i| i.key_pressed(Key::Minus)) {
             self.zoom_level = (self.zoom_level / 1.2).max(0.1);
             self.mode = ReaderMode::Zoom(self.zoom_level);
-        }
-        if ctx.input(|i| i.key_pressed(Key::Home)) {
-            self.go_to_page(0);
-        }
-        if ctx.input(|i| i.key_pressed(Key::End)) {
-            self.go_to_page(self.total_pages.saturating_sub(1));
         }
         if ctx.input(|i| i.key_pressed(Key::OpenBracket)) {
             self.mode = ReaderMode::FitWidth;

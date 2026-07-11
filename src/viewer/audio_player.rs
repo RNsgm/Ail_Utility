@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const AUDIO_BUFFER_SAMPLES: usize = 48_000 * 2;
+const AUDIO_AHEAD_SECS: f64 = 0.35;
 
 pub struct AudioPlayer {
     cancel: Arc<AtomicBool>,
@@ -212,6 +213,19 @@ fn decode_audio_to_buffer(
                 }
 
                 if let Ok(mut guard) = buffer.lock() {
+                    let max_ahead =
+                        (sample_rate as f64 * channels as f64 * AUDIO_AHEAD_SECS) as usize;
+                    while guard.len() >= max_ahead {
+                        drop(guard);
+                        if cancel.load(Ordering::Relaxed) {
+                            return Ok(());
+                        }
+                        std::thread::sleep(Duration::from_millis(8));
+                        guard = buffer
+                            .lock()
+                            .map_err(|_| "audio buffer lock poisoned".to_string())?;
+                    }
+
                     for s in samples {
                         if guard.len() >= AUDIO_BUFFER_SAMPLES {
                             guard.pop_front();

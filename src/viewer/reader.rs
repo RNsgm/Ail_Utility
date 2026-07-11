@@ -632,10 +632,12 @@ impl ReaderView {
         let elapsed = player.elapsed().clamp(0.0, player.duration);
         let mut seek_target = None;
         let mut volume = player.volume;
+        let panel_width = ui.available_width();
 
+        ui.set_width(panel_width);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.add_space(theme::CONTENT_PAD);
+                ui.add_space(10.0);
 
                 if ui
                     .button(if player.is_paused { "▶" } else { "⏸" })
@@ -663,30 +665,28 @@ impl ReaderView {
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(theme::CONTENT_PAD);
-
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut volume, 0.0..=1.0)
-                                .show_value(false)
-                                .trailing_fill(true),
-                        )
-                        .changed()
-                    {
-                        player.set_volume(volume);
-                    }
-
+                    ui.add_space(10.0);
+                    theme::with_slider_width(ui, 96.0, |ui| {
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut volume, 0.0..=1.0)
+                                    .show_value(false)
+                                    .trailing_fill(true),
+                            )
+                            .changed()
+                        {
+                            player.set_volume(volume);
+                        }
+                    });
                     ui.label(RichText::new("🔊").color(theme::text_muted()));
                 });
             });
 
-            ui.horizontal(|ui| {
-                ui.add_space(theme::CONTENT_PAD);
+            ui.add_space(6.0);
 
-                let mut slider_val = self.video_scrub_time.unwrap_or(elapsed);
-                let seek_width = ui.available_width() - theme::CONTENT_PAD;
-                let resp = ui.add_sized(
-                    [seek_width.max(100.0), 20.0],
+            let mut slider_val = self.video_scrub_time.unwrap_or(elapsed);
+            theme::with_slider_width(ui, ui.available_width(), |ui| {
+                let resp = ui.add(
                     egui::Slider::new(&mut slider_val, 0.0..=player.duration.max(0.001))
                         .show_value(false)
                         .trailing_fill(true),
@@ -703,8 +703,6 @@ impl ReaderView {
                 } else if resp.changed() && !resp.dragged() {
                     seek_target = Some(slider_val);
                 }
-
-                ui.add_space(theme::CONTENT_PAD);
             });
         });
 
@@ -712,6 +710,25 @@ impl ReaderView {
             self.video_scrub_time = None;
             player.seek_to(ctx, target);
         }
+    }
+
+    fn video_display_scale(
+        mode: ReaderMode,
+        zoom_level: f32,
+        img_size: Vec2,
+        available_size: Vec2,
+    ) -> f32 {
+        match mode {
+            ReaderMode::FitWindow => {
+                let ratio_x = available_size.x / img_size.x;
+                let ratio_y = available_size.y / img_size.y;
+                ratio_x.min(ratio_y)
+            }
+            ReaderMode::FitWidth => available_size.x / img_size.x,
+            ReaderMode::FitHeight => available_size.y / img_size.y,
+            ReaderMode::Original => 1.0,
+            ReaderMode::Zoom(z) => z,
+        } * zoom_level
     }
 
     fn render_video(&mut self, ctx: &Context, ui: &mut Ui, mode: ReaderMode, zoom_level: f32) {
@@ -734,30 +751,17 @@ impl ReaderView {
 
         let img_size = tex.size_vec2();
         let available_size = ui.available_size();
-
-        let display_scale = match mode {
-            ReaderMode::FitWindow => {
-                let ratio_x = available_size.x / img_size.x;
-                let ratio_y = available_size.y / img_size.y;
-                ratio_x.min(ratio_y).min(1.0)
-            }
-            ReaderMode::FitWidth => (available_size.x / img_size.x).min(1.0),
-            ReaderMode::FitHeight => (available_size.y / img_size.y).min(1.0),
-            ReaderMode::Original => 1.0,
-            ReaderMode::Zoom(z) => z,
-        } * zoom_level;
-
+        let display_scale =
+            Self::video_display_scale(mode, zoom_level, img_size, available_size);
         let final_size = img_size * display_scale;
-        let x_offset = (available_size.x - final_size.x).max(0.0) / 2.0;
-        let y_offset = (available_size.y - final_size.y).max(0.0) / 2.0;
 
-        ui.vertical(|ui| {
-            ui.add_space(y_offset);
-            ui.horizontal(|ui| {
-                ui.add_space(x_offset);
-                ui.add(egui::Image::new(tex).max_size(final_size));
-            });
-        });
+        ui.allocate_ui_with_layout(
+            available_size,
+            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+            |ui| {
+                ui.add(egui::Image::new(tex).fit_to_exact_size(final_size));
+            },
+        );
     }
 
     fn render_image(&mut self, ui: &mut Ui, page: usize, mode: ReaderMode, zoom_level: f32) {
@@ -816,6 +820,11 @@ impl ReaderView {
     }
 
     fn handle_input(&mut self, ctx: &Context, response: &mut ReaderResponse) {
+        if ctx.input(|i| i.key_pressed(Key::Space)) {
+            if let Some(player) = self.video_player.as_mut() {
+                player.toggle_pause();
+            }
+        }
         if ctx.input(|i| i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::D)) {
             self.next_page();
         }

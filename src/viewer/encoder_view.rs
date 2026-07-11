@@ -2,8 +2,9 @@ use crate::encoder::{
     collect_encoding_jobs, encode_media_to_ail, CompressionType, EncodeOptions, EncodeStatus,
 };
 use crate::log_info;
+use crate::viewer::theme::{self, primary_button};
 use crate::viewer::thread_util::spawn_worker;
-use egui::{Color32, Context, RichText, Ui};
+use egui::{Context, Ui};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -47,25 +48,24 @@ impl EncoderView {
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) {
         self.process_messages();
 
+        ui.add_space(8.0);
         ui.vertical(|ui| {
-            ui.heading("Кодировщик в .ail");
-            ui.label(
-                RichText::new(
-                    "Папка с картинками → один .ail-галерея; каждое видео в папке → свой .ail; архивы → отдельно",
-                )
-                .color(Color32::GRAY),
+            theme::page_header(
+                ui,
+                "Кодировщик в .ail",
+                Some(
+                    "Папка с картинками → галерея; каждое видео → свой .ail; архивы → отдельно",
+                ),
             );
-            ui.add_space(10.0);
 
-            ui.group(|ui| {
-                ui.label("1. Выбор файлов и папок");
-                ui.horizontal(|ui| {
-                    if ui.button("➕ Добавить файлы").clicked() {
+            theme::section_card(ui, "1. Источники", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("➕ Файлы").clicked() {
                         if let Some(files) = rfd::FileDialog::new().pick_files() {
                             self.add_paths(files);
                         }
                     }
-                    if ui.button("📁 Добавить папку").clicked() {
+                    if ui.button("📁 Папка").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                             self.add_paths([folder]);
                         }
@@ -77,35 +77,31 @@ impl EncoderView {
 
                 let (files, folders) = self.count_inputs();
                 let jobs = collect_encoding_jobs(&self.input_paths, self.output_dir.as_deref());
-                ui.label(format!(
-                    "Источников: {} файлов, {} папок → {} заданий .ail",
-                    files,
-                    folders,
-                    jobs.len()
-                ));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Источников: {files} файлов, {folders} папок → {} заданий",
+                        jobs.len()
+                    ))
+                    .color(theme::text_muted()),
+                );
 
                 if !self.input_paths.is_empty() {
                     egui::ScrollArea::vertical()
                         .max_height(120.0)
                         .show(ui, |ui| {
                             for path in &self.input_paths {
-                                let label = if path.is_dir() {
-                                    format!("📁 {}", path.display())
-                                } else {
-                                    format!("📄 {}", path.display())
-                                };
-                                ui.label(label);
+                                let icon = if path.is_dir() { "📁" } else { "📄" };
+                                ui.label(format!("{icon} {}", path.display()));
                             }
                         });
                 }
             });
 
-            ui.add_space(5.0);
+            ui.add_space(8.0);
 
-            ui.group(|ui| {
-                ui.label("2. Папка сохранения");
+            theme::section_card(ui, "2. Папка сохранения", |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("📁 Выбрать папку").clicked() {
+                    if ui.button("📁 Выбрать").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                             self.output_dir = Some(folder);
                         }
@@ -114,17 +110,16 @@ impl EncoderView {
                         ui.label(dir.to_string_lossy());
                     } else {
                         ui.label(
-                            RichText::new("Не выбрана (будет рядом с исходником)")
-                                .color(Color32::GOLD),
+                            egui::RichText::new("Не выбрана — рядом с исходником")
+                                .color(theme::text_hint()),
                         );
                     }
                 });
             });
 
-            ui.add_space(5.0);
+            ui.add_space(8.0);
 
-            ui.group(|ui| {
-                ui.label("3. Настройки");
+            theme::section_card(ui, "3. Настройки", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Сжатие:");
                     ui.selectable_value(
@@ -149,41 +144,27 @@ impl EncoderView {
                 );
             });
 
-            ui.add_space(10.0);
+            ui.add_space(12.0);
 
             if self.is_encoding {
                 ui.add(
                     egui::ProgressBar::new(self.progress.0 as f32 / self.progress.1.max(1) as f32)
-                        .text(format!("Обработка {}/{}", self.progress.0, self.progress.1)),
+                        .text(format!("Обработка {}/{}", self.progress.0, self.progress.1))
+                        .fill(theme::accent()),
                 );
-                ui.label(format!("Текущий: {}", self.current_file));
+                ui.label(
+                    egui::RichText::new(format!("Текущий: {}", self.current_file))
+                        .color(theme::text_muted()),
+                );
             } else {
                 let can_start = !self.input_paths.is_empty();
-                if ui
-                    .add_enabled(
-                        can_start,
-                        egui::Button::new("🚀 Начать кодирование").min_size([200.0, 40.0].into()),
-                    )
-                    .clicked()
-                {
+                if primary_button(ui, "🚀 Начать кодирование", can_start).clicked() {
                     self.start_encoding(ctx);
                 }
             }
 
-            ui.add_space(10.0);
-            ui.label("Логи:");
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for (msg, is_err) in self.logs.iter().rev() {
-                        let color = if *is_err {
-                            Color32::LIGHT_RED
-                        } else {
-                            Color32::LIGHT_GREEN
-                        };
-                        ui.label(RichText::new(msg).color(color));
-                    }
-                });
+            ui.add_space(12.0);
+            theme::log_panel(ui, 200.0, &self.logs);
         });
     }
 
@@ -271,14 +252,14 @@ impl EncoderView {
                         self.current_file = name;
                     }
                     EncodeMessage::Success(name) => {
-                        self.logs.push((format!("✅ Готово: {}", name), false));
+                        self.logs.push((format!("✅ Готово: {name}"), false));
                     }
                     EncodeMessage::Skipped(name) => {
-                        self.logs.push((format!("⏭ Пропущен: {}", name), false));
+                        self.logs.push((format!("⏭ Пропущен: {name}"), false));
                     }
                     EncodeMessage::Error(name, err) => {
                         self.logs
-                            .push((format!("❌ Ошибка {}: {}", name, err), true));
+                            .push((format!("❌ Ошибка {name}: {err}"), true));
                     }
                     EncodeMessage::Done => {
                         self.is_encoding = false;

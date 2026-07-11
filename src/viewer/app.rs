@@ -1,4 +1,5 @@
 use crate::viewer::{ConverterView, EncoderView, GalleryView, ReaderView};
+use crate::viewer::theme::{self, NAV_WIDTH};
 
 /// Основное состояние приложения
 pub struct ViewerApp {
@@ -7,6 +8,7 @@ pub struct ViewerApp {
     encoder: EncoderView,
     converter: ConverterView,
     mode: AppMode,
+    fullscreen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -18,13 +20,15 @@ enum AppMode {
 }
 
 impl ViewerApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        theme::apply(&cc.egui_ctx);
         Self {
             gallery: GalleryView::new(),
             reader: ReaderView::new(),
             encoder: EncoderView::new(),
             converter: ConverterView::new(),
             mode: AppMode::Gallery,
+            fullscreen: false,
         }
     }
 
@@ -41,12 +45,13 @@ impl ViewerApp {
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1280.0, 720.0])
-                .with_min_inner_size([800.0, 600.0]),
+                .with_min_inner_size([900.0, 620.0])
+                .with_title("ArchiveUtils"),
             ..Default::default()
         };
 
         eframe::run_native(
-            "AIL Viewer",
+            "ArchiveUtils",
             options,
             Box::new(|cc| Ok(Box::new(ViewerApp::new(cc)))),
         )
@@ -59,29 +64,49 @@ impl eframe::App for ViewerApp {
 
         egui::Panel::left("nav_panel")
             .resizable(false)
-            .default_size(160.0)
+            .default_width(NAV_WIDTH)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::panel())
+                    .inner_margin(egui::Margin::symmetric(12, 16))
+                    .stroke(egui::Stroke::new(1.0, theme::border())),
+            )
             .show_inside(ui, |ui| {
-                ui.heading("AIL Tool");
-                ui.add_space(10.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("ArchiveUtils")
+                            .size(18.0)
+                            .strong()
+                            .color(theme::accent()),
+                    );
+                    ui.label(
+                        egui::RichText::new("AIL")
+                            .size(11.0)
+                            .color(theme::text_muted()),
+                    );
+                });
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(8.0);
 
-                if ui
-                    .selectable_label(self.mode == AppMode::Gallery, "🖼 Галерея")
-                    .clicked()
-                {
+                if theme::nav_button(ui, self.mode == AppMode::Gallery, "🖼", "Галерея") {
                     self.mode = AppMode::Gallery;
                 }
-                if ui
-                    .selectable_label(self.mode == AppMode::Encoder, "⚙ Кодировщик")
-                    .clicked()
-                {
+                if theme::nav_button(ui, self.mode == AppMode::Encoder, "⚙", "Кодировщик") {
                     self.mode = AppMode::Encoder;
                 }
-                if ui
-                    .selectable_label(self.mode == AppMode::Converter, "🎬 TTS → MP4")
-                    .clicked()
-                {
+                if theme::nav_button(ui, self.mode == AppMode::Converter, "🎬", "TTS → MP4") {
                     self.mode = AppMode::Converter;
                 }
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("F — полный экран · H — скрыть UI")
+                            .size(10.0)
+                            .color(theme::text_muted()),
+                    );
+                });
             });
 
         match self.mode {
@@ -100,6 +125,14 @@ impl eframe::App for ViewerApp {
                     self.reader.close();
                     self.gallery.clear_selection();
                     self.mode = AppMode::Gallery;
+                    if self.fullscreen {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                        self.fullscreen = false;
+                    }
+                }
+                if response.toggle_fullscreen {
+                    self.fullscreen = !self.fullscreen;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
                 }
             }
             AppMode::Encoder => {

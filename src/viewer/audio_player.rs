@@ -7,8 +7,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const AUDIO_BUFFER_SAMPLES: usize = 48_000 * 2;
-const AUDIO_AHEAD_SECS: f64 = 0.35;
+/// ~2 s of stereo audio at 48 kHz.
+const AUDIO_BUFFER_SAMPLES: usize = 48_000 * 2 * 2;
+/// Keep the decode thread this far ahead of playback.
+const AUDIO_AHEAD_SECS: f64 = 1.5;
+/// Don't start speakers until at least this much audio is buffered.
+const AUDIO_PREFILL_SECS: f64 = 0.75;
 
 pub struct AudioPlayer {
     cancel: Arc<AtomicBool>,
@@ -53,17 +57,18 @@ impl AudioPlayer {
                 None,
             )
             .ok()?;
-        stream.play().ok()?;
 
         let player = Self {
-            cancel,
+            cancel: cancel.clone(),
             volume,
-            buffer,
+            buffer: buffer.clone(),
             sample_rate,
             channels,
             _stream: stream,
         };
         player.spawn_decode(path, start_time);
+        player.wait_prefill();
+        player._stream.play().ok()?;
         Some(player)
     }
 
@@ -89,8 +94,31 @@ impl AudioPlayer {
         if let Ok(mut guard) = self.buffer.lock() {
             guard.clear();
         }
+        let _ = self._stream.pause();
         self.cancel = Arc::new(AtomicBool::new(false));
         self.spawn_decode(path, start_time);
+        self.wait_prefill();
+        let _ = self._stream.play();
+    }
+
+    fn wait_prefill(&self) {
+        let prefill_samples = (self.sample_rate as f64
+            * self.channels as f64
+            * AUDIO_PREFILL_SECS) as usize;
+        for _ in 0..300 {
+            if self.cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let ready = self
+                .buffer
+                .lock()
+                .map(|guard| guard.len() >= prefill_samples)
+                .unwrap_or(false);
+            if ready {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn spawn_decode(&self, path: PathBuf, start_time: f64) {
@@ -136,7 +164,12 @@ struct AudioDecoderState {
 
 #[cfg(feature = "ffmpeg")]
 impl AudioDecoderState {
-    fn open(path: &PathBuf, start_time: f64, sample_rate: u32, channels: usize) -> Result<Self, String> {
+    fn open(
+        path: &PathBuf,
+        start_time: f64,
+        sample_rate: u32,
+        channels: usize,
+    ) -> Result<Self, String> {
         use ffmpeg_next::{codec, format, media, software::resampling, util::format::Sample};
         use ffmpeg_next::util::format::sample::Type;
 
@@ -161,8 +194,13 @@ impl AudioDecoderState {
             decoder.flush();
         }
 
-        let out_layout = ffmpeg_next::util::channel_layout::ChannelLayout::STEREO;
         let out_channels = channels.max(2) as u16;
+        let out_layout = if out_channels >= 2 {
+            ffmpeg_next::util::channel_layout::ChannelLayout::STEREO
+        } else {
+            ffmpeg_next::util::channel_layout::ChannelLayout::MONO
+        };
+
         let resampler = resampling::Context::get(
             decoder.format(),
             decoder.channel_layout(),
@@ -213,7 +251,27 @@ impl AudioDecoderState {
         }
     }
 
-    fn convert_frame(&mut self, decoded: &ffmpeg_next::frame::Audio) -> Result<Option<Vec<f32>>, String> {
+    fn decode_batch(&mut self, max_samples: usize) -> Result<Option<Vec<f32>>, String> {
+        let mut batch = Vec::with_capacity(max_samples.min(16_384));
+
+        while batch.len() < max_samples {
+            let Some(chunk) = self.decode_chunk()? else {
+                break;
+            };
+            batch.extend(chunk);
+        }
+
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(batch))
+        }
+    }
+
+    fn convert_frame(
+        &mut self,
+        decoded: &ffmpeg_next::frame::Audio,
+    ) -> Result<Option<Vec<f32>>, String> {
         let mut converted = ffmpeg_next::frame::Audio::empty();
         if self.resampler.run(decoded, &mut converted).is_err() {
             return Ok(None);
@@ -257,12 +315,14 @@ fn decode_audio_to_buffer(
         }
     };
 
+    let max_ahead = (sample_rate as f64 * channels as f64 * AUDIO_AHEAD_SECS) as usize;
+    let batch_target = (sample_rate as f64 * channels as f64 * 0.1) as usize;
+
     loop {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
 
-        let max_ahead = (sample_rate as f64 * channels as f64 * AUDIO_AHEAD_SECS) as usize;
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return;
@@ -271,27 +331,29 @@ fn decode_audio_to_buffer(
             if ahead < max_ahead {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(8));
+            std::thread::sleep(Duration::from_millis(4));
         }
 
-        let chunk = match crate::ffmpeg_util::with_ffmpeg(|| decoder.decode_chunk()) {
-            Ok(chunk) => chunk,
+        let batch = match crate::ffmpeg_util::with_ffmpeg(|| {
+            decoder.decode_batch(batch_target.max(4_096))
+        }) {
+            Ok(batch) => batch,
             Err(e) => {
-                log_error!("audio decode chunk failed for {}: {e}", path.display());
+                log_error!("audio decode batch failed for {}: {e}", path.display());
                 break;
             }
         };
 
-        let Some(samples) = chunk else {
+        let Some(samples) = batch else {
             break;
         };
 
         if let Ok(mut guard) = buffer.lock() {
             for sample in samples {
-                if guard.len() >= AUDIO_BUFFER_SAMPLES {
-                    guard.pop_front();
-                }
                 guard.push_back(sample);
+            }
+            while guard.len() > AUDIO_BUFFER_SAMPLES {
+                guard.pop_front();
             }
         }
     }

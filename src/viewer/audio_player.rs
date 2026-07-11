@@ -92,6 +92,11 @@ impl AudioPlayer {
     }
 
     fn spawn_decode(&self, path: PathBuf, start_time: f64) {
+        log_info!(
+            "AudioPlayer: decode {} @ {start_time:.3}s",
+            path.display()
+        );
+
         let cancel = self.cancel.clone();
         let buffer = self.buffer.clone();
         let sample_rate = self.sample_rate;
@@ -106,10 +111,6 @@ impl AudioPlayer {
                 cancel,
             );
         });
-        log_info!(
-            "AudioPlayer: decode {} @ {start_time:.3}s",
-            path.display()
-        );
     }
 }
 
@@ -146,7 +147,7 @@ fn decode_audio_to_buffer(
         let stream = input
             .stream(stream_index)
             .ok_or_else(|| "Missing audio stream".to_string())?;
-        let mut decoder_ctx = codec::context::Context::from_parameters(stream.parameters())
+        let decoder_ctx = codec::context::Context::from_parameters(stream.parameters())
             .map_err(|e| e.to_string())?;
         let mut decoder = decoder_ctx.decoder().audio().map_err(|e| e.to_string())?;
 

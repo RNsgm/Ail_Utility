@@ -723,7 +723,7 @@ impl ReaderView {
         img_size: Vec2,
         available_size: Vec2,
     ) -> f32 {
-        match mode {
+        let base = match mode {
             ReaderMode::FitWindow => {
                 let ratio_x = available_size.x / img_size.x;
                 let ratio_y = available_size.y / img_size.y;
@@ -733,7 +733,8 @@ impl ReaderView {
             ReaderMode::FitHeight => available_size.y / img_size.y,
             ReaderMode::Original => 1.0,
             ReaderMode::Zoom(z) => z,
-        } * zoom_level
+        };
+        base * zoom_level
     }
 
     fn render_video(&mut self, ctx: &Context, ui: &mut Ui, mode: ReaderMode, zoom_level: f32) {

@@ -1,5 +1,6 @@
 use crate::decoder::AilInfo;
 use crate::viewer::texture_loader::{load_color_images_from_memory, TextureCache};
+use crate::viewer::thread_util::spawn_worker;
 use egui::{Color32, Context, Key, Rect, RichText, Sense, Ui, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -43,7 +44,7 @@ impl GalleryView {
         let (tx, rx) = channel::<GalleryMessage>();
         self.load_receiver = Some(rx);
 
-        std::thread::spawn(move || {
+        spawn_worker("gallery_load", move || {
             let entries: Vec<_> = std::fs::read_dir(&path)
                 .ok()
                 .into_iter()

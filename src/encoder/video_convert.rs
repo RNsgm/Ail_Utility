@@ -124,7 +124,13 @@ fn try_ffmpeg_remux(input: &Path, output: &Path) -> Result<(), EncoderError> {
 
     let _ = std::fs::remove_file(output);
 
-    ffmpeg_next::init().map_err(|e| EncoderError::VideoConvert(format!("FFmpeg init: {e}")))?;
+    crate::ffmpeg_util::with_ffmpeg(|| remux_tts(input, output).map_err(|e| e.to_string()))
+        .map_err(|e| EncoderError::VideoConvert(e))
+}
+
+#[cfg(feature = "ffmpeg")]
+fn remux_tts(input: &Path, output: &Path) -> Result<(), EncoderError> {
+    use ffmpeg_next::{codec, encoder, format, media, Rational};
 
     let mut ictx =
         format::input(input).map_err(|e| EncoderError::VideoConvert(format!("Open input: {e}")))?;

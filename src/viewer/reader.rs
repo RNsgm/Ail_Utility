@@ -3,6 +3,7 @@ use crate::encoder::MediaType;
 use crate::viewer::texture_loader::{
     load_color_images_from_memory, load_gif_color_images, GifFrame, TextureCache,
 };
+use crate::viewer::thread_util::spawn_worker;
 use crate::viewer::video_player::VideoPlayer;
 use egui::{Context, Key, RichText, Ui, Vec2};
 use std::path::PathBuf;
@@ -103,7 +104,7 @@ impl ReaderView {
         let ctx_clone = ctx.clone();
         let path_clone = path.clone();
 
-        std::thread::spawn(move || {
+        spawn_worker("reader_load", move || {
             let mut decoder = match AilDecoder::open(&path_clone) {
                 Ok(d) => d,
                 Err(e) => {

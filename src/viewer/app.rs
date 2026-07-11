@@ -29,6 +29,11 @@ impl ViewerApp {
     }
 
     pub fn run() -> eframe::Result {
+        #[cfg(feature = "ffmpeg")]
+        if let Err(e) = crate::ffmpeg_util::ensure_initialized() {
+            eprintln!("Warning: FFmpeg init failed: {e}");
+        }
+
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1280.0, 720.0])

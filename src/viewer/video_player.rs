@@ -1,7 +1,10 @@
+use crate::viewer::thread_util::spawn_worker;
 use egui::{Context, TextureHandle, TextureOptions};
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
+
+const FRAME_BUFFER: usize = 3;
 
 pub struct VideoPlayer {
     receiver: Receiver<(egui::ColorImage, f64)>,
@@ -20,10 +23,10 @@ pub struct VideoPlayer {
 impl VideoPlayer {
     pub fn new(ctx: &Context, temp_path: PathBuf) -> Self {
         let duration = probe_duration(&temp_path);
-        let (frame_tx, frame_rx) = channel();
+        let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(FRAME_BUFFER);
         let path = temp_path.clone();
 
-        std::thread::spawn(move || {
+        spawn_worker("video_decode", move || {
             decode_video_frames(&path, frame_tx, 0.0);
         });
 
@@ -122,10 +125,10 @@ impl VideoPlayer {
     pub fn seek_to(&mut self, ctx: &Context, target: f64) {
         let target = target.clamp(0.0, self.duration);
 
-        let (frame_tx, frame_rx) = channel();
+        let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(FRAME_BUFFER);
         let path = self.temp_path.clone();
 
-        std::thread::spawn(move || {
+        spawn_worker("video_seek", move || {
             decode_video_frames(&path, frame_tx, target);
         });
 
@@ -146,136 +149,135 @@ impl Drop for VideoPlayer {
     }
 }
 
-fn fmt_time(seconds: f64) -> String {
-    let secs = seconds as u64;
-    let mins = secs / 60;
-    let hrs = mins / 60;
-    let rem = secs % 60;
-    if hrs > 0 {
-        format!("{:02}:{:02}:{:02}", hrs, mins % 60, rem)
-    } else {
-        format!("{:02}:{:02}", mins, rem)
-    }
-}
-
 fn probe_duration(path: &PathBuf) -> f64 {
-    use ffmpeg_next::format;
-    if ffmpeg_next::init().is_err() {
-        return 0.0;
+    #[cfg(feature = "ffmpeg")]
+    {
+        use ffmpeg_next::format;
+
+        return crate::ffmpeg_util::with_ffmpeg(|| {
+            let ictx = format::input(path).map_err(|e| e.to_string())?;
+            Ok(ictx.duration() as f64 / 1_000_000.0)
+        })
+        .unwrap_or(0.0);
     }
-    let ictx = match format::input(path) {
-        Ok(c) => c,
-        Err(_) => return 0.0,
-    };
-    ictx.duration() as f64 / 1_000_000.0
+
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        let _ = path;
+        0.0
+    }
 }
 
 fn decode_video_frames(
     path: &PathBuf,
-    sender: std::sync::mpsc::Sender<(egui::ColorImage, f64)>,
+    sender: SyncSender<(egui::ColorImage, f64)>,
     start_time: f64,
 ) {
-    use ffmpeg_next::{codec, format, frame, software::scaling, util::format::Pixel};
+    #[cfg(feature = "ffmpeg")]
+    {
+        use ffmpeg_next::{codec, format, frame, software::scaling, util::format::Pixel};
 
-    if ffmpeg_next::init().is_err() {
-        return;
-    }
-    let mut ictx = match format::input(path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+        let _ = crate::ffmpeg_util::with_ffmpeg(|| {
+            let mut ictx = format::input(path).map_err(|e| e.to_string())?;
 
-    let video_stream_index = match ictx.streams().best(ffmpeg_next::media::Type::Video) {
-        Some(s) => s.index(),
-        None => return,
-    };
-    let tb = {
-        let stream = match ictx.stream(video_stream_index) {
-            Some(s) => s,
-            None => return,
-        };
-        stream.time_base()
-    };
+            let video_stream_index = ictx
+                .streams()
+                .best(ffmpeg_next::media::Type::Video)
+                .ok_or_else(|| "No video stream".to_string())?
+                .index();
 
-    if start_time > 0.0 {
-        let ts = (start_time * f64::from(tb.denominator()) / f64::from(tb.numerator())) as i64;
-        let _ = ictx.seek(ts, ..);
-    }
+            let tb = ictx
+                .stream(video_stream_index)
+                .ok_or_else(|| "Missing video stream".to_string())?
+                .time_base();
 
-    let stream = match ictx.stream(video_stream_index) {
-        Some(s) => s,
-        None => return,
-    };
-    let time_base = stream.time_base();
-
-    let decoder_params = stream.parameters();
-    let decoder = match codec::context::Context::from_parameters(decoder_params.clone()) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let mut decoder = match decoder.decoder().video() {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-
-    let mut scaler = match scaling::Context::get(
-        decoder.format(),
-        decoder.width(),
-        decoder.height(),
-        Pixel::RGB24,
-        decoder.width(),
-        decoder.height(),
-        scaling::Flags::BILINEAR,
-    ) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    for (_stream, packet) in ictx.packets() {
-        if _stream.index() != video_stream_index {
-            continue;
-        }
-        let mut decoded = frame::Video::empty();
-        if decoder.send_packet(&packet).is_err() {
-            continue;
-        }
-
-        while decoder.receive_frame(&mut decoded).is_ok() {
-            let mut rgb_frame = frame::Video::empty();
-            if scaler.run(&decoded, &mut rgb_frame).is_err() {
-                continue;
+            if start_time > 0.0 {
+                let ts =
+                    (start_time * f64::from(tb.denominator()) / f64::from(tb.numerator())) as i64;
+                let _ = ictx.seek(ts, ..);
             }
 
-            let width = decoder.width() as usize;
-            let height = decoder.height() as usize;
-            let stride = rgb_frame.stride(0) as usize;
+            let stream = ictx
+                .stream(video_stream_index)
+                .ok_or_else(|| "Missing video stream".to_string())?;
+            let time_base = stream.time_base();
 
-            let mut rgba_data = Vec::with_capacity(width * height * 4);
-            for y in 0..height {
-                let offset = y * stride;
-                for x in 0..width {
-                    rgba_data.extend_from_slice(&[
-                        rgb_frame.data(0)[offset + x * 3],
-                        rgb_frame.data(0)[offset + x * 3 + 1],
-                        rgb_frame.data(0)[offset + x * 3 + 2],
-                        255,
-                    ]);
+            let decoder_params = stream.parameters();
+            let decoder = codec::context::Context::from_parameters(decoder_params.clone())
+                .map_err(|e| e.to_string())?;
+            let mut decoder = decoder.decoder().video().map_err(|e| e.to_string())?;
+
+            let mut scaler = scaling::Context::get(
+                decoder.format(),
+                decoder.width(),
+                decoder.height(),
+                Pixel::RGB24,
+                decoder.width(),
+                decoder.height(),
+                scaling::Flags::BILINEAR,
+            )
+            .map_err(|e| e.to_string())?;
+
+            for (_stream, packet) in ictx.packets() {
+                if _stream.index() != video_stream_index {
+                    continue;
+                }
+
+                let mut decoded = frame::Video::empty();
+                if decoder.send_packet(&packet).is_err() {
+                    continue;
+                }
+
+                while decoder.receive_frame(&mut decoded).is_ok() {
+                    let pts = decoded
+                        .timestamp()
+                        .map(|ts| {
+                            ts as f64 * f64::from(time_base.numerator())
+                                / f64::from(time_base.denominator())
+                        })
+                        .unwrap_or(0.0);
+
+                    if pts + 0.001 < start_time {
+                        continue;
+                    }
+
+                    let mut rgb_frame = frame::Video::empty();
+                    if scaler.run(&decoded, &mut rgb_frame).is_err() {
+                        continue;
+                    }
+
+                    let width = decoder.width() as usize;
+                    let height = decoder.height() as usize;
+                    let stride = rgb_frame.stride(0) as usize;
+
+                    let mut rgba_data = Vec::with_capacity(width * height * 4);
+                    for y in 0..height {
+                        let offset = y * stride;
+                        for x in 0..width {
+                            rgba_data.extend_from_slice(&[
+                                rgb_frame.data(0)[offset + x * 3],
+                                rgb_frame.data(0)[offset + x * 3 + 1],
+                                rgb_frame.data(0)[offset + x * 3 + 2],
+                                255,
+                            ]);
+                        }
+                    }
+
+                    let color_image =
+                        egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba_data);
+
+                    if sender.send((color_image, pts)).is_err() {
+                        return Ok(());
+                    }
                 }
             }
 
-            let size = [width, height];
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba_data);
-            let pts = decoded
-                .timestamp()
-                .map(|ts| {
-                    ts as f64 * f64::from(time_base.numerator())
-                        / f64::from(time_base.denominator())
-                })
-                .unwrap_or(0.0);
+            Ok(())
+        });
+    }
 
-            if sender.send((color_image, pts)).is_err() {
-                return;
-            }
-        }
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        let _ = (path, sender, start_time);
     }
 }

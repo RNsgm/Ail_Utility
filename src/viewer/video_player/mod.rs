@@ -15,6 +15,9 @@ use clock::PlaybackClock;
 use decoder::{probe_duration, probe_fps, VideoDecoder};
 use presenter::{DecodedFrame, FramePresenter};
 
+/// Сдвиг видео относительно аудио (сек). Отрицательный — видео раньше, положительный — позже.
+const AV_VIDEO_OFFSET_SECS: f64 = 0.0;
+
 /// Проигрыватель видео: clock + буфер на 30с + декодер + презентер + аудио.
 pub struct VideoPlayer {
     path: PathBuf,
@@ -67,7 +70,7 @@ impl VideoPlayer {
     }
 
     pub fn update(&mut self, ctx: &Context) -> Option<&TextureHandle> {
-        let now = self.master_time();
+        let now = self.video_time();
         let mut seek_to_start = false;
 
         {
@@ -90,9 +93,15 @@ impl VideoPlayer {
             } else if !self.clock.is_paused() && !self.stream_ended {
                 if self.looping && self.clock.reached_end() {
                     seek_to_start = true;
-                } else if let Some(frame) = store.pop_due(now, self.displayed_pts) {
-                    drop(store);
-                    self.display_frame(ctx, frame);
+                } else {
+                    let mut frame_to_show = None;
+                    while let Some(frame) = store.pop_due(now, self.displayed_pts) {
+                        frame_to_show = Some(frame);
+                    }
+                    if let Some(frame) = frame_to_show {
+                        drop(store);
+                        self.display_frame(ctx, frame);
+                    }
                 }
             }
         }
@@ -191,6 +200,10 @@ impl VideoPlayer {
         }
     }
 
+    fn video_time(&self) -> f64 {
+        (self.master_time() + AV_VIDEO_OFFSET_SECS).max(0.0)
+    }
+
     fn master_time(&self) -> f64 {
         if let Some(audio) = &self.audio {
             audio.playback_time()
@@ -214,8 +227,8 @@ impl VideoPlayer {
             return;
         }
 
-        let min_buffered = (self.fps.max(1.0) * 1.0) as usize;
-        if self.store.lock().len() < min_buffered.max(15) {
+        let min_buffered = (self.fps.max(1.0) * 0.25) as usize;
+        if self.store.lock().len() < min_buffered.max(8) {
             return;
         }
 
@@ -266,7 +279,7 @@ impl VideoPlayer {
             return;
         }
 
-        let now = self.master_time();
+        let now = self.video_time();
         let frame_step = 1.0 / self.fps.max(1.0);
         let store = self.store.lock();
         if let Some(next_pts) = store.next_pts_after(self.displayed_pts) {

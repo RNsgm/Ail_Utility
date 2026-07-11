@@ -183,7 +183,6 @@ impl VideoPlayer {
     fn display_frame(&mut self, ctx: &Context, frame: DecodedFrame) {
         self.displayed_pts = frame.pts;
         self.presenter.show(ctx, frame);
-        self.ensure_audio();
     }
 
     fn ensure_audio(&mut self) {
@@ -196,7 +195,7 @@ impl VideoPlayer {
             return;
         }
 
-        let start = self.clock.now();
+        let start = self.displayed_pts.max(0.0);
         let Some(audio) = AudioPlayer::start(self.path.clone(), start) else {
             return;
         };

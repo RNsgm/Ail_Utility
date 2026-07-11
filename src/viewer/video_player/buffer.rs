@@ -42,7 +42,7 @@ impl FrameBuffer {
                 Ok(frame) => {
                     let replace = best
                         .as_ref()
-                        .map(|prev| frame.pts >= prev.pts)
+                        .map(|prev: &DecodedFrame| frame.pts >= prev.pts)
                         .unwrap_or(true);
                     if replace {
                         best = Some(frame);

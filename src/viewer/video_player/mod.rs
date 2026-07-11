@@ -10,20 +10,21 @@ use egui::{Context, TextureHandle};
 use crate::viewer::audio_player::AudioPlayer;
 use crate::{log_info};
 
-use buffer::FrameBuffer;
+use buffer::FrameQueue;
 use clock::PlaybackClock;
 use decoder::{probe_duration, probe_fps, VideoDecoder};
 use presenter::{DecodedFrame, FramePresenter};
 
-/// Проигрыватель видео: master clock + декодер + буфер кадров + презентер + аудио.
+/// Проигрыватель видео: clock + декодер + очередь кадров + презентер + аудио.
 pub struct VideoPlayer {
     path: PathBuf,
     clock: PlaybackClock,
     decoder: VideoDecoder,
-    buffer: FrameBuffer,
+    queue: FrameQueue,
     presenter: FramePresenter,
     awaiting_seek_frame: bool,
     stream_ended: bool,
+    displayed_pts: f64,
     audio: Option<AudioPlayer>,
     fps: f64,
     pub looping: bool,
@@ -45,10 +46,11 @@ impl VideoPlayer {
             path: path.clone(),
             clock: PlaybackClock::new(duration),
             decoder: VideoDecoder::start(path, 0.0),
-            buffer: FrameBuffer::new(),
+            queue: FrameQueue::new(),
             presenter: FramePresenter::new(),
             awaiting_seek_frame: true,
             stream_ended: false,
+            displayed_pts: f64::NEG_INFINITY,
             audio: None,
             fps,
             looping: false,
@@ -60,32 +62,31 @@ impl VideoPlayer {
     }
 
     pub fn update(&mut self, ctx: &Context) -> Option<&TextureHandle> {
-        self.buffer.ingest(self.decoder.receiver());
+        let now = self.clock.now();
+        self.queue.ingest(self.decoder.receiver(), now);
 
         if self.awaiting_seek_frame {
-            if let Some(frame) = self.buffer.take_latest() {
-                self.present_frame(ctx, frame);
+            if let Some(frame) = self.queue.take_first() {
+                self.display_frame(ctx, frame);
                 self.awaiting_seek_frame = false;
                 self.stream_ended = false;
-            } else if self.buffer.is_disconnected() {
+            } else if self.queue.is_disconnected() {
                 self.awaiting_seek_frame = false;
             } else {
                 ctx.request_repaint();
                 return self.presenter.texture();
             }
-        }
-
-        if !self.clock.is_paused() && !self.stream_ended {
+        } else if !self.clock.is_paused() && !self.stream_ended {
             if self.looping && self.clock.reached_end() {
                 self.seek_to(ctx, 0.0);
-            } else if let Some(frame) = self.buffer.take_due(self.clock.now()) {
-                self.present_frame(ctx, frame);
+            } else if let Some(frame) = self.queue.pop_due(now, self.displayed_pts) {
+                self.display_frame(ctx, frame);
             }
         }
 
         if !self.clock.is_paused()
-            && self.buffer.is_disconnected()
-            && !self.buffer.has_frame()
+            && self.queue.is_disconnected()
+            && self.queue.is_empty()
             && !self.stream_ended
         {
             self.stream_ended = true;
@@ -142,23 +143,21 @@ impl VideoPlayer {
         log_info!("VideoPlayer::seek_to {target:.3}s file={}", self.path.display());
 
         self.decoder.stop();
-        self.buffer.drain(self.decoder.receiver());
+        self.queue.drain(self.decoder.receiver());
 
         self.decoder = VideoDecoder::start(self.path.clone(), target);
         self.clock.seek(target);
         self.awaiting_seek_frame = true;
         self.stream_ended = false;
-        self.buffer.reset_disconnect();
+        self.displayed_pts = target - 0.001;
+        self.queue.reset_disconnect();
 
         self.sync_audio(target, was_paused);
         ctx.request_repaint();
     }
 
-    fn frame_interval(&self) -> Duration {
-        Duration::from_secs_f64(1.0 / self.fps.max(1.0))
-    }
-
-    fn present_frame(&mut self, ctx: &Context, frame: DecodedFrame) {
+    fn display_frame(&mut self, ctx: &Context, frame: DecodedFrame) {
+        self.displayed_pts = frame.pts;
         self.presenter.show(ctx, frame);
         self.ensure_audio();
     }
@@ -204,11 +203,15 @@ impl VideoPlayer {
     fn schedule_repaint(&self, ctx: &Context) {
         if self.clock.is_paused() {
             ctx.request_repaint_after(Duration::from_millis(100));
-        } else if let Some(next_pts) = self.buffer.next_pts() {
-            let wait = (next_pts - self.clock.now()).max(0.0);
+            return;
+        }
+
+        let now = self.clock.now();
+        if let Some(next_pts) = self.queue.next_pts_after(self.displayed_pts) {
+            let wait = (next_pts - now).max(0.0);
             ctx.request_repaint_after(Duration::from_secs_f64(wait.min(0.05)));
         } else {
-            ctx.request_repaint_after(self.frame_interval());
+            ctx.request_repaint_after(Duration::from_secs_f64(1.0 / self.fps.max(1.0)));
         }
     }
 }
@@ -216,7 +219,7 @@ impl VideoPlayer {
 impl Drop for VideoPlayer {
     fn drop(&mut self) {
         self.decoder.stop();
-        self.buffer.drain(self.decoder.receiver());
+        self.queue.drain(self.decoder.receiver());
         self.audio = None;
         log_info!("VideoPlayer::drop removing {}", self.path.display());
         let _ = std::fs::remove_file(&self.path);

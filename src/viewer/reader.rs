@@ -650,6 +650,7 @@ impl ReaderView {
         // Controls
         let elapsed = player.elapsed().clamp(0.0, player.duration);
         let mut seek_target = None;
+        let mut scrub_time = elapsed;
 
         media_bar_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -668,27 +669,36 @@ impl ReaderView {
                     player.looping = !player.looping;
                 }
 
+                let slider_width = ui.available_width() - 20.0;
+                let mut slider_val = elapsed;
+                let resp = ui.add_sized(
+                    [slider_width.max(50.0), 20.0],
+                    egui::Slider::new(&mut slider_val, 0.0..=player.duration.max(0.001))
+                        .show_value(false)
+                        .trailing_fill(true),
+                );
+
+                if resp.dragged() {
+                    scrub_time = slider_val;
+                } else {
+                    scrub_time = elapsed;
+                }
+
+                if resp.drag_stopped() {
+                    seek_target = Some(slider_val);
+                } else if resp.changed() && !resp.dragged() {
+                    seek_target = Some(slider_val);
+                }
+
                 ui.label(
                     RichText::new(format!(
                         "{} / {}",
-                        fmt_time(elapsed),
+                        fmt_time(scrub_time),
                         fmt_time(player.duration)
                     ))
                     .monospace()
                     .color(theme::text_muted()),
                 );
-
-                let slider_width = ui.available_width() - 20.0;
-                let mut slider_val = elapsed;
-                let resp = ui.add_sized(
-                    [slider_width.max(50.0), 20.0],
-                    egui::Slider::new(&mut slider_val, 0.0..=player.duration)
-                        .show_value(false)
-                        .trailing_fill(true),
-                );
-                if resp.changed() {
-                    seek_target = Some(slider_val);
-                }
             });
         });
 

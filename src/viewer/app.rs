@@ -60,7 +60,7 @@ impl eframe::App for ViewerApp {
         egui::Panel::left("nav_panel")
             .resizable(false)
             .default_size(160.0)
-            .show(&ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.heading("AIL Tool");
                 ui.add_space(10.0);
 
@@ -86,14 +86,12 @@ impl eframe::App for ViewerApp {
 
         match self.mode {
             AppMode::Gallery => {
-                egui::CentralPanel::default().show(&ctx, |ui| {
-                    let response = self.gallery.ui(&ctx, ui);
+                let response = self.gallery.ui(&ctx, ui);
 
-                    if let Some(path) = response.clicked_file {
-                        self.reader.open_file(&ctx, path);
-                        self.mode = AppMode::Reader;
-                    }
-                });
+                if let Some(path) = response.clicked_file {
+                    self.reader.open_file(&ctx, path);
+                    self.mode = AppMode::Reader;
+                }
             }
             AppMode::Reader => {
                 let response = self.reader.ui(&ctx, ui);
@@ -105,14 +103,10 @@ impl eframe::App for ViewerApp {
                 }
             }
             AppMode::Encoder => {
-                egui::CentralPanel::default().show(&ctx, |ui| {
-                    self.encoder.ui(&ctx, ui);
-                });
+                self.encoder.ui(&ctx, ui);
             }
             AppMode::Converter => {
-                egui::CentralPanel::default().show(&ctx, |ui| {
-                    self.converter.ui(&ctx, ui);
-                });
+                self.converter.ui(&ctx, ui);
             }
         }
     }

@@ -137,12 +137,10 @@ fn collect_convertible_files_inner(path: &Path, out: &mut Vec<PathBuf>) {
 
 #[cfg(feature = "ffmpeg")]
 fn try_ffmpeg_remux(input: &Path, output: &Path) -> Result<(), EncoderError> {
-    use ffmpeg_next::{codec, encoder, format, media, Rational};
-
     let _ = std::fs::remove_file(output);
 
     crate::ffmpeg_util::with_ffmpeg(|| remux_tts(input, output).map_err(|e| e.to_string()))
-        .map_err(|e| EncoderError::VideoConvert(e))
+        .map_err(EncoderError::VideoConvert)
 }
 
 #[cfg(feature = "ffmpeg")]

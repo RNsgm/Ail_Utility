@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
+#[cfg(feature = "ffmpeg")]
+use crate::encoder::video_convert::{convert_to_mp4, needs_mp4_conversion};
 use crate::encoder::{
     is_media_file, AilBuilder, ArchiveType, CompressionType, EncoderError, MediaType,
 };
@@ -492,6 +494,58 @@ fn decode_video_frames(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, EncoderErr
 
     Ok(frames)
 }
+
+#[cfg(feature = "ffmpeg")]
+fn encode_video_file_to_ail(
+    input_path: &Path,
+    output_path: &Path,
+    options: &EncodeOptions,
+) -> Result<(), EncoderError> {
+    let converted_path = if needs_mp4_conversion(input_path) {
+        let temp = std::env::temp_dir().join(format!(
+            "ail_convert_{}_{}.mp4",
+            std::process::id(),
+            input_path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        convert_to_mp4(input_path, &temp)?;
+        Some(temp)
+    } else {
+        None
+    };
+
+    let video_path = converted_path.as_deref().unwrap_or(input_path);
+
+    let data = std::fs::read(video_path)?;
+    let name = if converted_path.is_some() {
+        input_path
+            .with_extension("mp4")
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("video.mp4")
+            .to_string()
+    } else {
+        input_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("video.mp4")
+            .to_string()
+    };
+
+    let mut builder = AilBuilder::new().with_thumbnail_size(options.thumbnail_size);
+    builder.add_video_blob(name, data, options.compression)?;
+
+    let output_file = File::create(output_path)?;
+    let mut writer = std::io::BufWriter::new(output_file);
+    builder.build(&mut writer)?;
+    writer.flush()?;
+
+    if let Some(temp) = converted_path {
+        let _ = std::fs::remove_file(temp);
+    }
+
+    Ok(())
+}
+
 /// Кодирует архив, медиа-файл или папку в .ail
 pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
     input_path: P,
@@ -523,6 +577,11 @@ pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
         return Ok(());
     }
 
+    #[cfg(feature = "ffmpeg")]
+    if MediaType::from_path(input_path).is_video() || needs_mp4_conversion(input_path) {
+        return encode_video_file_to_ail(input_path, output_path.as_ref(), &options);
+    }
+
     let ext = input_path
         .extension()
         .and_then(|e| e.to_str())
@@ -545,31 +604,6 @@ pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
         "gif" => {
             let data = std::fs::read(input_path)?;
             images = decode_gif_frames(&data)?;
-        }
-        "mp4" | "webm" | "avi" | "mov" | "mkv" | "flv" | "wmv" | "m4v" | "ogv" | "mpeg" | "mpg" => {
-            #[cfg(not(feature = "ffmpeg"))]
-            {
-                return Err(EncoderError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "Video encoding requires the ffmpeg feature",
-                )));
-            }
-            #[cfg(feature = "ffmpeg")]
-            {
-                let data = std::fs::read(&input_path)?;
-                let name = input_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("video.mp4")
-                    .to_string();
-                builder.add_video_blob(name, data, options.compression)?;
-
-                let output_file = File::create(output_path)?;
-                let mut writer = std::io::BufWriter::new(output_file);
-                builder.build(&mut writer)?;
-                writer.flush()?;
-                return Ok(());
-            }
         }
         _ => {
             return Err(EncoderError::InvalidArchiveType);

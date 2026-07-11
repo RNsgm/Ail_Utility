@@ -1,12 +1,17 @@
 pub mod format;
 pub mod reader;
+pub mod video_convert;
 
 pub use format::{
     read_index_entries, AilBuilder, AilEntry, AilHeader, AilThumbnail, CompressionType, EntryType,
 };
 pub use reader::{
     batch_encode, encode_archive_to_ail, encode_from_directory, encode_media_to_ail,
-    list_media_in_archive, EncodeOptions,
+    list_media_in_archive, BatchEncodeResult, EncodeOptions,
+};
+pub use video_convert::{
+    collect_convertible_files, convert_to_mp4, convert_to_mp4_if_needed, is_ts_extension,
+    mp4_output_path, needs_mp4_conversion,
 };
 
 use std::path::Path;
@@ -42,6 +47,7 @@ pub enum EncoderError {
     InvalidArchiveType,
     NoImagesFound,
     Crypto(String),
+    VideoConvert(String),
 }
 
 impl std::fmt::Display for EncoderError {
@@ -54,6 +60,7 @@ impl std::fmt::Display for EncoderError {
             EncoderError::InvalidArchiveType => write!(f, "Invalid or unsupported archive type"),
             EncoderError::NoImagesFound => write!(f, "No image files found in archive"),
             EncoderError::Crypto(e) => write!(f, "Crypto error: {}", e),
+            EncoderError::VideoConvert(e) => write!(f, "Video convert error: {}", e),
         }
     }
 }
@@ -102,7 +109,7 @@ impl MediaType {
         match ext.as_str() {
             "gif" => MediaType::Gif,
             "mp4" | "webm" | "avi" | "mov" | "mkv" | "flv" | "wmv" | "m4v" | "ogv" | "mpeg"
-            | "mpg" => MediaType::Video,
+            | "mpg" | "ts" | "mts" | "m2ts" | "tsv" => MediaType::Video,
             "jpg" | "jpeg" | "png" | "bmp" | "tiff" | "tif" | "webp" | "ico" | "svg" | "avif"
             | "heic" | "heif" => MediaType::Image,
             _ => MediaType::Unknown,
@@ -124,7 +131,8 @@ pub fn is_media_file<P: AsRef<Path>>(path: P) -> bool {
         // Изображения
         "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "ico", "svg", "avif", "heic",
         "heif", // Видео
-        "mp4", "webm", "avi", "mov", "mkv", "flv", "wmv", "m4v", "ogv", "mpeg", "mpg",
+        "mp4", "webm", "avi", "mov", "mkv", "flv", "wmv", "m4v", "ogv", "mpeg", "mpg", "ts", "mts",
+        "m2ts", "tsv",
     ];
 
     if let Some(ext) = path.as_ref().extension() {

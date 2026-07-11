@@ -1,10 +1,11 @@
-use crate::viewer::{EncoderView, GalleryView, ReaderView};
+use crate::viewer::{ConverterView, EncoderView, GalleryView, ReaderView};
 
 /// Основное состояние приложения
 pub struct ViewerApp {
     gallery: GalleryView,
     reader: ReaderView,
     encoder: EncoderView,
+    converter: ConverterView,
     mode: AppMode,
 }
 
@@ -13,6 +14,7 @@ enum AppMode {
     Gallery,
     Reader,
     Encoder,
+    Converter,
 }
 
 impl ViewerApp {
@@ -21,6 +23,7 @@ impl ViewerApp {
             gallery: GalleryView::new(),
             reader: ReaderView::new(),
             encoder: EncoderView::new(),
+            converter: ConverterView::new(),
             mode: AppMode::Gallery,
         }
     }
@@ -64,6 +67,12 @@ impl eframe::App for ViewerApp {
                 {
                     self.mode = AppMode::Encoder;
                 }
+                if ui
+                    .selectable_label(self.mode == AppMode::Converter, "🎬 TS → MP4")
+                    .clicked()
+                {
+                    self.mode = AppMode::Converter;
+                }
             });
 
         match self.mode {
@@ -89,6 +98,11 @@ impl eframe::App for ViewerApp {
             AppMode::Encoder => {
                 egui::CentralPanel::default().show(&ctx, |ui| {
                     self.encoder.ui(&ctx, ui);
+                });
+            }
+            AppMode::Converter => {
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    self.converter.ui(&ctx, ui);
                 });
             }
         }

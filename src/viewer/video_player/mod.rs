@@ -202,7 +202,7 @@ impl VideoPlayer {
 
         if let Some(next_pts) = self.buffer.next_pts() {
             let wait = (next_pts - self.clock.now()).max(0.0);
-            ctx.request_repaint_after(Duration::from_secs_f64(wait.min(0.25)));
+            ctx.request_repaint_after(Duration::from_secs_f64(wait.min(0.05)));
         } else if self.buffer.is_disconnected() {
             ctx.request_repaint_after(Duration::from_millis(100));
         } else {

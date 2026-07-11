@@ -58,17 +58,27 @@ impl FrameBuffer {
         best
     }
 
-    /// Взять самый свежий кадр с pts ≤ clock (догон без зависания).
+    /// Взять самый свежий кадр с pts ≤ clock.
     pub fn take_due(&mut self, receiver: &Receiver<DecodedFrame>, clock: f64) -> Option<DecodedFrame> {
-        let mut latest_due = self.pending.take();
+        let mut latest_due = None;
+
+        if let Some(pending) = self.pending.take() {
+            if pending.pts <= clock + 0.001 {
+                latest_due = Some(pending);
+            } else {
+                self.pending = Some(pending);
+            }
+        }
 
         loop {
             match receiver.try_recv() {
                 Ok(frame) => {
                     if frame.pts <= clock + 0.001 {
                         latest_due = Some(frame);
-                    } else {
+                    } else if self.pending.is_none() {
                         self.pending = Some(frame);
+                        break;
+                    } else {
                         break;
                     }
                 }

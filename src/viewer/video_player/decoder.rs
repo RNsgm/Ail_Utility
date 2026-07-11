@@ -263,7 +263,7 @@ impl DecoderState {
                     self.waiting_keyframe = false;
                 }
 
-                let frame_pts = decoded
+                let raw_pts = decoded
                     .pts()
                     .map(|ts| ts_to_seconds(ts, self.time_base))
                     .or_else(|| {
@@ -273,14 +273,12 @@ impl DecoderState {
                     })
                     .or(packet_pts);
 
-                let pts = frame_pts.unwrap_or_else(|| {
-                    self.start_secs + self.frames_emitted as f64 / self.fps
-                });
-                self.frames_emitted += 1;
-
-                if pts + 0.05 < self.start_secs {
+                if raw_pts.map(|p| p + 0.05 < self.start_secs).unwrap_or(false) {
                     continue;
                 }
+
+                let pts = self.start_secs + self.frames_emitted as f64 / self.fps;
+                self.frames_emitted += 1;
 
                 let mut rgb_frame = frame::Video::empty();
                 if self.scaler.run(&decoded, &mut rgb_frame).is_err() {

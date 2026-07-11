@@ -102,6 +102,50 @@ pub fn probe_duration(path: &PathBuf) -> f64 {
     }
 }
 
+/// Смещение видео относительно аудио (сек): video_start - audio_start.
+pub fn probe_av_offset(path: &PathBuf) -> f64 {
+    #[cfg(feature = "ffmpeg")]
+    {
+        use ffmpeg_next::{format, media};
+
+        return crate::ffmpeg_util::with_ffmpeg(|| {
+            let ictx = format::input(path).map_err(|e| e.to_string())?;
+            let video_start = ictx
+                .streams()
+                .best(media::Type::Video)
+                .map(stream_start_secs)
+                .unwrap_or(0.0);
+            let audio_start = ictx
+                .streams()
+                .best(media::Type::Audio)
+                .map(stream_start_secs)
+                .unwrap_or(0.0);
+            let offset = video_start - audio_start;
+            log_info!(
+                "probe_av_offset: video_start={video_start:.3}s audio_start={audio_start:.3}s offset={offset:.3}s"
+            );
+            Ok(offset)
+        })
+        .unwrap_or(0.0);
+    }
+
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        let _ = path;
+        0.0
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn stream_start_secs(stream: ffmpeg_next::format::stream::Stream) -> f64 {
+    const AV_NOPTS_VALUE: i64 = i64::MIN + 1;
+    let st = stream.start_time();
+    if st == AV_NOPTS_VALUE {
+        return 0.0;
+    }
+    st as f64 / 1_000_000.0
+}
+
 fn decode_loop(
     path: &PathBuf,
     start_secs: f64,
@@ -330,11 +374,16 @@ impl DecoderState {
                     .map(|ts| ts_to_seconds(ts, self.time_base))
             });
 
-        if raw_pts.map(|p| p + 0.05 < self.start_secs).unwrap_or(false) {
+        if raw_pts
+            .map(|p| p + 0.04 < self.start_secs)
+            .unwrap_or(false)
+        {
             return Ok(None);
         }
 
-        let pts = self.start_secs + self.frames_emitted as f64 / self.fps;
+        let pts = raw_pts.unwrap_or_else(|| {
+            self.start_secs + self.frames_emitted as f64 / self.fps
+        });
         self.frames_emitted += 1;
 
         let mut rgb_frame = frame::Video::empty();

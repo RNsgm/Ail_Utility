@@ -116,38 +116,31 @@ pub fn encode_archive_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
         ArchiveType::from_path(&archive_path).ok_or(EncoderError::InvalidArchiveType)?;
 
     let mut builder = AilBuilder::new().with_thumbnail_size(options.thumbnail_size);
-    let mut items: Vec<MediaItem> = Vec::new();
+    let mut images: Vec<(String, Vec<u8>)> = Vec::new();
 
     match archive_type {
         ArchiveType::Zip => {
-            read_zip_archive(&archive_path, &mut items)?;
+            read_zip_archive(&archive_path, &mut images)?;
         }
         ArchiveType::Rar => {
-            read_rar_archive(&archive_path, &mut items)?;
+            read_rar_archive(&archive_path, &mut images)?;
         }
         ArchiveType::SevenZip => {
-            read_7z_archive(&archive_path, &mut items)?;
+            read_7z_archive(&archive_path, &mut images)?;
         }
     }
 
-    if items.is_empty() {
+    if images.is_empty() {
         return Err(EncoderError::NoImagesFound);
     }
 
-    // Сортировка по имени файла если нужно
     if options.sort_by_name {
-        items.sort_by(|a, b| {
-            let name_a = match a {
-                MediaItem::Image { name, .. } | MediaItem::Video { name, .. } => name,
-            };
-            let name_b = match b {
-                MediaItem::Image { name, .. } | MediaItem::Video { name, .. } => name,
-            };
-            alphanumeric_sort::compare_str(name_a, name_b)
-        });
+        images.sort_by(|a, b| alphanumeric_sort::compare_str(&a.0, &b.0));
     }
 
-    add_media_items_to_builder(&mut builder, items, options.compression)?;
+    for (name, data) in images {
+        builder.add_image(name, data, options.compression)?;
+    }
 
     // Создаем выходной файл
     let output_file = File::create(output_path)?;
@@ -224,7 +217,7 @@ pub fn encode_from_directory<P: AsRef<Path>, Q: AsRef<Path>>(
 /// Читает ZIP архив и извлекает изображения
 fn read_zip_archive<P: AsRef<Path>>(
     path: P,
-    items: &mut Vec<MediaItem>,
+    images: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<(), EncoderError> {
     let file = File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -233,22 +226,19 @@ fn read_zip_archive<P: AsRef<Path>>(
         let mut file = archive.by_index(i)?;
         let name = file.name().to_string();
 
-        // Проверяем, является ли файл изображением
-        if !is_media_file(&name) {
+        if !crate::encoder::is_image_file(&name) {
             continue;
         }
 
-        // Пропускаем директории
         if file.is_dir() {
             continue;
         }
 
-        // Читаем данные файла
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
 
         if !data.is_empty() {
-            push_media_item(items, name, data);
+            images.push((name, data));
         }
     }
 
@@ -259,7 +249,7 @@ fn read_zip_archive<P: AsRef<Path>>(
 #[cfg(feature = "unrar")]
 fn read_rar_archive<P: AsRef<Path>>(
     path: P,
-    items: &mut Vec<MediaItem>,
+    images: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<(), EncoderError> {
     let path = path.as_ref();
 
@@ -270,7 +260,7 @@ fn read_rar_archive<P: AsRef<Path>>(
         .open_for_processing()
         .map_err(|e| EncoderError::Rar(format!("Failed to open RAR: {:?}", e)))?;
 
-    read_rar_entries(open_archive, items)?;
+    read_rar_entries(open_archive, images)?;
 
     Ok(())
 }
@@ -278,7 +268,7 @@ fn read_rar_archive<P: AsRef<Path>>(
 #[cfg(feature = "unrar")]
 fn read_rar_entries(
     mut open_archive: unrar::OpenArchive<unrar::Process, unrar::CursorBeforeHeader>,
-    items: &mut Vec<MediaItem>,
+    images: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<(), EncoderError> {
     loop {
         // Читаем заголовок - получаем OpenArchive с CursorBeforeFile
@@ -292,14 +282,13 @@ fn read_rar_entries(
         let filename = entry.filename.to_string_lossy().to_string();
 
         // Проверяем, является ли файл изображением
-        if is_media_file(&filename) && !entry.is_directory() {
-            // Читаем данные файла
+        if crate::encoder::is_image_file(&filename) && !entry.is_directory() {
             let (data, next_archive) = archive_with_file
                 .read()
                 .map_err(|e| EncoderError::Rar(format!("RAR read data error: {:?}", e)))?;
 
             if !data.is_empty() {
-                push_media_item(items, filename, data);
+                images.push((filename, data));
             }
 
             open_archive = next_archive;
@@ -317,7 +306,7 @@ fn read_rar_entries(
 #[cfg(not(feature = "unrar"))]
 fn read_rar_archive<P: AsRef<Path>>(
     _path: P,
-    _items: &mut Vec<MediaItem>,
+    _images: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<(), EncoderError> {
     Err(EncoderError::Rar(
         "RAR support requires building with the unrar feature".to_string(),
@@ -327,14 +316,14 @@ fn read_rar_archive<P: AsRef<Path>>(
 /// Читает 7z архив и извлекает изображения
 fn read_7z_archive<P: AsRef<Path>>(
     path: P,
-    items: &mut Vec<MediaItem>,
+    images: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<(), EncoderError> {
     sevenz_rust::decompress_file_with_extract_fn(path, "", |entry, reader, _| {
         let name = entry.name().to_string();
-        if is_media_file(&name) && !entry.is_directory() {
+        if crate::encoder::is_image_file(&name) && !entry.is_directory() {
             let mut data = Vec::new();
             if reader.read_to_end(&mut data).is_ok() && !data.is_empty() {
-                push_media_item(items, name, data);
+                images.push((name, data));
             }
         }
         Ok(true)
@@ -639,46 +628,38 @@ pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
         .to_lowercase();
 
     let mut builder = AilBuilder::new().with_thumbnail_size(options.thumbnail_size);
-    let mut items: Vec<MediaItem> = Vec::new();
+    let mut images: Vec<(String, Vec<u8>)> = Vec::new();
 
     match ext.as_str() {
         "zip" | "rar" | "7z" => {
             let archive_type =
                 ArchiveType::from_path(input_path).ok_or(EncoderError::InvalidArchiveType)?;
             match archive_type {
-                ArchiveType::Zip => read_zip_archive(input_path, &mut items)?,
-                ArchiveType::Rar => read_rar_archive(input_path, &mut items)?,
-                ArchiveType::SevenZip => read_7z_archive(input_path, &mut items)?,
+                ArchiveType::Zip => read_zip_archive(input_path, &mut images)?,
+                ArchiveType::Rar => read_rar_archive(input_path, &mut images)?,
+                ArchiveType::SevenZip => read_7z_archive(input_path, &mut images)?,
             }
         }
         "gif" => {
             let data = std::fs::read(input_path)?;
-            for (name, data) in decode_gif_frames(&data)? {
-                items.push(MediaItem::Image { name, data });
-            }
+            images = decode_gif_frames(&data)?;
         }
         _ => {
             return Err(EncoderError::InvalidArchiveType);
         }
     }
 
-    if items.is_empty() {
+    if images.is_empty() {
         return Err(EncoderError::NoImagesFound);
     }
 
     if options.sort_by_name {
-        items.sort_by(|a, b| {
-            let name_a = match a {
-                MediaItem::Image { name, .. } | MediaItem::Video { name, .. } => name,
-            };
-            let name_b = match b {
-                MediaItem::Image { name, .. } | MediaItem::Video { name, .. } => name,
-            };
-            alphanumeric_sort::compare_str(name_a, name_b)
-        });
+        images.sort_by(|a, b| alphanumeric_sort::compare_str(&a.0, &b.0));
     }
 
-    add_media_items_to_builder(&mut builder, items, options.compression)?;
+    for (name, data) in images {
+        builder.add_image(name, data, options.compression)?;
+    }
 
     let output_file = File::create(output_path)?;
     let mut writer = std::io::BufWriter::new(output_file);
@@ -733,7 +714,7 @@ pub fn list_media_in_archive<P: AsRef<Path>>(archive_path: P) -> Result<Vec<Stri
                 let file = archive.by_index(i)?;
                 let name = file.name().to_string();
 
-                if is_media_file(&name) && !file.is_dir() {
+                if crate::encoder::is_image_file(&name) && !file.is_dir() {
                     images.push(name);
                 }
             }
@@ -751,7 +732,7 @@ pub fn list_media_in_archive<P: AsRef<Path>>(archive_path: P) -> Result<Vec<Stri
                         .map_err(|e| EncoderError::Rar(format!("RAR list error: {:?}", e)))?;
                     let filename = entry.filename.to_string_lossy().to_string();
 
-                    if is_media_file(&filename) && !entry.is_directory() {
+                    if crate::encoder::is_image_file(&filename) && !entry.is_directory() {
                         images.push(filename);
                     }
                 }
@@ -766,7 +747,7 @@ pub fn list_media_in_archive<P: AsRef<Path>>(archive_path: P) -> Result<Vec<Stri
         ArchiveType::SevenZip => {
             sevenz_rust::decompress_file_with_extract_fn(&archive_path, "", |entry, _reader, _| {
                 let name = entry.name().to_string();
-                if is_media_file(&name) && !entry.is_directory() {
+                if crate::encoder::is_image_file(&name) && !entry.is_directory() {
                     images.push(name);
                 }
                 Ok(true)

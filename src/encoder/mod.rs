@@ -136,6 +136,12 @@ pub fn is_video_file<P: AsRef<Path>>(path: P) -> bool {
     MediaType::from_path(path).is_video()
 }
 
+/// Проверяет, является ли файл изображением (не видео) по расширению
+pub fn is_image_file<P: AsRef<Path>>(path: P) -> bool {
+    let path = path.as_ref();
+    is_media_file(path) && !is_video_file(path)
+}
+
 /// Расширение контейнера для временного видеофайла (для FFmpeg).
 pub fn video_container_extension(name: &str) -> &'static str {
     let ext = name.rsplit('.').next().unwrap_or("mp4");

@@ -10,17 +10,17 @@ use egui::{Context, TextureHandle};
 use crate::viewer::audio_player::AudioPlayer;
 use crate::{log_info};
 
-use buffer::FrameQueue;
+use buffer::{SharedFrameStore, READ_AHEAD_SECS};
 use clock::PlaybackClock;
 use decoder::{probe_duration, probe_fps, VideoDecoder};
 use presenter::{DecodedFrame, FramePresenter};
 
-/// Проигрыватель видео: clock + декодер + очередь кадров + презентер + аудио.
+/// Проигрыватель видео: clock + буфер на 30с + декодер + презентер + аудио.
 pub struct VideoPlayer {
     path: PathBuf,
     clock: PlaybackClock,
     decoder: VideoDecoder,
-    queue: FrameQueue,
+    store: SharedFrameStore,
     presenter: FramePresenter,
     awaiting_seek_frame: bool,
     stream_ended: bool,
@@ -40,13 +40,18 @@ impl VideoPlayer {
         );
         let duration = probe_duration(&path);
         let fps = probe_fps(&path);
-        log_info!("VideoPlayer: duration={duration:.3}s fps={fps:.3}");
+        log_info!(
+            "VideoPlayer: duration={duration:.3}s fps={fps:.3} read_ahead={READ_AHEAD_SECS}s"
+        );
+
+        let store = SharedFrameStore::new(fps);
+        let decoder = VideoDecoder::start(path.clone(), 0.0, store.clone());
 
         let player = Self {
-            path: path.clone(),
+            path,
             clock: PlaybackClock::new(duration),
-            decoder: VideoDecoder::start(path, 0.0),
-            queue: FrameQueue::new(),
+            decoder,
+            store,
             presenter: FramePresenter::new(),
             awaiting_seek_frame: true,
             stream_ended: false,
@@ -63,34 +68,45 @@ impl VideoPlayer {
 
     pub fn update(&mut self, ctx: &Context) -> Option<&TextureHandle> {
         let now = self.clock.now();
-        self.queue.ingest(self.decoder.receiver(), now);
+        let mut store = self.store.lock();
+        store.trim_before(now);
 
         if self.awaiting_seek_frame {
-            if let Some(frame) = self.queue.take_first() {
+            if let Some(frame) = store.take_first() {
+                drop(store);
                 self.display_frame(ctx, frame);
                 self.awaiting_seek_frame = false;
                 self.stream_ended = false;
-            } else if self.queue.is_disconnected() {
+            } else if store.is_eof() {
                 self.awaiting_seek_frame = false;
             } else {
+                drop(store);
                 ctx.request_repaint();
                 return self.presenter.texture();
             }
         } else if !self.clock.is_paused() && !self.stream_ended {
             if self.looping && self.clock.reached_end() {
+                drop(store);
                 self.seek_to(ctx, 0.0);
-            } else if let Some(frame) = self.queue.pop_due(now, self.displayed_pts) {
+            } else if let Some(frame) = store.pop_due(now, self.displayed_pts) {
+                drop(store);
                 self.display_frame(ctx, frame);
             }
         }
 
-        if !self.clock.is_paused()
-            && self.queue.is_disconnected()
-            && self.queue.is_empty()
-            && !self.stream_ended
-        {
+        let ended = {
+            let store = self.store.lock();
+            store.is_eof()
+                && store.is_empty()
+                && store.next_pts_after(self.displayed_pts).is_none()
+        };
+        if !self.clock.is_paused() && ended && !self.stream_ended {
             self.stream_ended = true;
             self.handle_end_of_stream(ctx);
+        }
+
+        if !self.awaiting_seek_frame {
+            self.ensure_audio();
         }
 
         self.schedule_repaint(ctx);
@@ -143,14 +159,13 @@ impl VideoPlayer {
         log_info!("VideoPlayer::seek_to {target:.3}s file={}", self.path.display());
 
         self.decoder.stop();
-        self.queue.drain(self.decoder.receiver());
+        self.store.lock().clear();
 
-        self.decoder = VideoDecoder::start(self.path.clone(), target);
+        self.decoder = VideoDecoder::start(self.path.clone(), target, self.store.clone());
         self.clock.seek(target);
         self.awaiting_seek_frame = true;
         self.stream_ended = false;
         self.displayed_pts = target - 0.001;
-        self.queue.reset_disconnect();
 
         self.sync_audio(target, was_paused);
         ctx.request_repaint();
@@ -166,6 +181,12 @@ impl VideoPlayer {
         if self.audio.is_some() {
             return;
         }
+
+        let min_buffered = (self.fps.max(1.0) * 1.0) as usize;
+        if self.store.lock().len() < min_buffered.max(15) {
+            return;
+        }
+
         let start = self.clock.now();
         let Some(audio) = AudioPlayer::start(self.path.clone(), start) else {
             return;
@@ -208,11 +229,14 @@ impl VideoPlayer {
 
         let now = self.clock.now();
         let frame_step = 1.0 / self.fps.max(1.0);
-        if let Some(next_pts) = self.queue.next_pts_after(self.displayed_pts) {
+        let store = self.store.lock();
+        if let Some(next_pts) = store.next_pts_after(self.displayed_pts) {
             let wait = (next_pts - now).max(0.0).min(frame_step);
             ctx.request_repaint_after(Duration::from_secs_f64(wait.max(0.008)));
+        } else if store.is_eof() {
+            ctx.request_repaint_after(Duration::from_millis(100));
         } else {
-            ctx.request_repaint_after(Duration::from_secs_f64(frame_step.min(0.05)));
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
 }
@@ -220,7 +244,7 @@ impl VideoPlayer {
 impl Drop for VideoPlayer {
     fn drop(&mut self) {
         self.decoder.stop();
-        self.queue.drain(self.decoder.receiver());
+        self.store.lock().clear();
         self.audio = None;
         log_info!("VideoPlayer::drop removing {}", self.path.display());
         let _ = std::fs::remove_file(&self.path);

@@ -1,40 +1,31 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::viewer::thread_util::spawn_worker;
 use crate::{log_error, log_info};
 
+use super::buffer::SharedFrameStore;
 use super::presenter::DecodedFrame;
 
-const FRAME_BUFFER: usize = 32;
-
 pub struct VideoDecoder {
-    receiver: Receiver<DecodedFrame>,
     cancel: Option<Arc<AtomicBool>>,
 }
 
 impl VideoDecoder {
-    pub fn start(path: PathBuf, start_secs: f64) -> Self {
-        let (tx, rx) = std::sync::mpsc::sync_channel(FRAME_BUFFER);
+    pub fn start(path: PathBuf, start_secs: f64, store: SharedFrameStore) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let worker_path = path;
 
         spawn_worker("video_decode", move || {
-            decode_loop(&worker_path, tx, start_secs, worker_cancel);
+            decode_loop(&worker_path, start_secs, store, worker_cancel);
         });
 
         Self {
-            receiver: rx,
             cancel: Some(cancel),
         }
-    }
-
-    pub fn receiver(&self) -> &Receiver<DecodedFrame> {
-        &self.receiver
     }
 
     pub fn stop(&mut self) {
@@ -113,8 +104,8 @@ pub fn probe_duration(path: &PathBuf) -> f64 {
 
 fn decode_loop(
     path: &PathBuf,
-    sender: SyncSender<DecodedFrame>,
     start_secs: f64,
+    store: SharedFrameStore,
     cancel: Arc<AtomicBool>,
 ) {
     #[cfg(feature = "ffmpeg")]
@@ -130,6 +121,7 @@ fn decode_loop(
             Ok(state) => state,
             Err(e) => {
                 log_error!("video_decode open failed for {}: {e}", path.display());
+                store.lock().set_eof();
                 return;
             }
         };
@@ -142,6 +134,13 @@ fn decode_loop(
                 break;
             }
 
+            while !store.lock().can_accept() {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(8));
+            }
+
             let frame = match crate::ffmpeg_util::with_ffmpeg(|| decoder.next_frame()) {
                 Ok(frame) => frame,
                 Err(e) => {
@@ -150,12 +149,15 @@ fn decode_loop(
                 }
             };
 
-            let Some(mut pending) = frame else {
-                log_info!(
-                    "video_decode: EOF path={} frames_sent={frames_sent}",
-                    path.display()
-                );
-                break;
+            let mut pending = match frame {
+                Some(frame) => frame,
+                None => {
+                    log_info!(
+                        "video_decode: EOF path={} frames_sent={frames_sent}",
+                        path.display()
+                    );
+                    break;
+                }
             };
 
             loop {
@@ -163,30 +165,28 @@ fn decode_loop(
                     return;
                 }
 
-                match sender.try_send(pending) {
+                match store.lock().try_push(pending) {
                     Ok(()) => {
                         frames_sent += 1;
-                        if frames_sent == 1 || frames_sent % 30 == 0 {
-                            log_info!("video_decode: sent frame #{frames_sent}");
+                        if frames_sent == 1 || frames_sent % 60 == 0 {
+                            log_info!("video_decode: buffered frame #{frames_sent}");
                         }
                         break;
                     }
-                    Err(TrySendError::Full(frame)) => {
+                    Err(frame) => {
                         pending = frame;
-                        std::thread::sleep(Duration::from_millis(4));
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        log_info!("video_decode: receiver closed after {frames_sent} frames");
-                        return;
+                        std::thread::sleep(Duration::from_millis(8));
                     }
                 }
             }
         }
+
+        store.lock().set_eof();
     }
 
     #[cfg(not(feature = "ffmpeg"))]
     {
-        let _ = (path, sender, start_secs, cancel);
+        let _ = (path, start_secs, store, cancel);
     }
 }
 
@@ -301,7 +301,6 @@ impl DecoderState {
                 continue;
             }
 
-            let packet_pts = packet.pts().map(|ts| ts_to_seconds(ts, self.time_base));
             if self.decoder.send_packet(&packet).is_err() {
                 continue;
             }
@@ -311,7 +310,7 @@ impl DecoderState {
     fn finish_frame(
         &mut self,
         decoded: ffmpeg_next::frame::Video,
-        packet_pts: Option<f64>,
+        _packet_pts: Option<f64>,
     ) -> Result<Option<DecodedFrame>, String> {
         use ffmpeg_next::frame;
 
@@ -329,8 +328,7 @@ impl DecoderState {
                 decoded
                     .timestamp()
                     .map(|ts| ts_to_seconds(ts, self.time_base))
-            })
-            .or(packet_pts);
+            });
 
         if raw_pts.map(|p| p + 0.05 < self.start_secs).unwrap_or(false) {
             return Ok(None);

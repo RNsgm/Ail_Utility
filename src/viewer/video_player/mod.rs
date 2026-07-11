@@ -79,8 +79,14 @@ impl VideoPlayer {
         } else if !self.clock.is_paused() && !self.stream_ended {
             if self.looping && self.clock.reached_end() {
                 self.seek_to(ctx, 0.0);
-            } else if let Some(frame) = self.queue.pop_due(now, self.displayed_pts) {
-                self.display_frame(ctx, frame);
+            } else {
+                let mut frame_to_show = None;
+                while let Some(frame) = self.queue.pop_due(now, self.displayed_pts) {
+                    frame_to_show = Some(frame);
+                }
+                if let Some(frame) = frame_to_show {
+                    self.display_frame(ctx, frame);
+                }
             }
         }
 

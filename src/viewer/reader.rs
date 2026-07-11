@@ -136,8 +136,9 @@ impl ReaderView {
                         .map(|e| e.entry_type == crate::encoder::EntryType::Video)
                         .unwrap_or(false)
                     {
+                        let ext = crate::encoder::video_container_extension(name);
                         let temp_name = format!(
-                            "archive_utils_video_{}_{}.mp4",
+                            "archive_utils_video_{}_{}.{ext}",
                             std::process::id(),
                             page_idx
                         );

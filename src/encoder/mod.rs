@@ -127,18 +127,75 @@ impl MediaType {
     }
 }
 
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "webm", "avi", "mov", "mkv", "flv", "wmv", "m4v", "ogv", "mpeg", "mpg", "tts",
+];
+
+/// Проверяет, является ли файл видео по расширению
+pub fn is_video_file<P: AsRef<Path>>(path: P) -> bool {
+    MediaType::from_path(path).is_video()
+}
+
+/// Проверяет, является ли файл изображением (не видео) по расширению
+pub fn is_image_file<P: AsRef<Path>>(path: P) -> bool {
+    let path = path.as_ref();
+    is_media_file(path) && !is_video_file(path)
+}
+
+/// Расширение контейнера для временного видеофайла (для FFmpeg).
+pub fn video_container_extension(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("mp4");
+
+    if ext.eq_ignore_ascii_case("mkv") {
+        return "mkv";
+    }
+    if ext.eq_ignore_ascii_case("webm") {
+        return "webm";
+    }
+    if ext.eq_ignore_ascii_case("avi") {
+        return "avi";
+    }
+    if ext.eq_ignore_ascii_case("mov") {
+        return "mov";
+    }
+    if ext.eq_ignore_ascii_case("flv") {
+        return "flv";
+    }
+    if ext.eq_ignore_ascii_case("wmv") {
+        return "wmv";
+    }
+    if ext.eq_ignore_ascii_case("m4v") {
+        return "m4v";
+    }
+    if ext.eq_ignore_ascii_case("ogv") {
+        return "ogv";
+    }
+    if ext.eq_ignore_ascii_case("mpeg") || ext.eq_ignore_ascii_case("mpg") {
+        return "mp4";
+    }
+    if ext.eq_ignore_ascii_case("mp4") {
+        return "mp4";
+    }
+
+    "mp4"
+}
+
+/// Путь к временному видеофайлу с корректным расширением.
+pub fn temp_video_path(prefix: &str, name_hint: &str) -> std::path::PathBuf {
+    let ext = video_container_extension(name_hint);
+    std::env::temp_dir().join(format!("{prefix}_{pid}.{ext}", pid = std::process::id()))
+}
+
 /// Проверяет, является ли файл медиа (изображение, GIF или видео) по расширению
 pub fn is_media_file<P: AsRef<Path>>(path: P) -> bool {
-    const MEDIA_EXTENSIONS: &[&str] = &[
-        // Изображения
+    const IMAGE_EXTENSIONS: &[&str] = &[
         "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "ico", "svg", "avif", "heic",
-        "heif", // Видео
-        "mp4", "webm", "avi", "mov", "mkv", "flv", "wmv", "m4v", "ogv", "mpeg", "mpg", "tts",
+        "heif",
     ];
 
     if let Some(ext) = path.as_ref().extension() {
         let ext = ext.to_str().unwrap_or("").to_lowercase();
-        MEDIA_EXTENSIONS.contains(&ext.as_str())
+        IMAGE_EXTENSIONS.contains(&ext.as_str()) || VIDEO_EXTENSIONS.contains(&ext.as_str())
     } else {
         false
     }
@@ -147,3 +204,23 @@ pub fn is_media_file<P: AsRef<Path>>(path: P) -> bool {
 pub const AIL_VERSION: u32 = 2;
 /// Магическое число для файла .ail ("AIL!")
 pub const AIL_MAGIC: &[u8; 4] = b"AIL!";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn mkv_is_video_file() {
+        assert!(is_video_file(Path::new("movie.mkv")));
+        assert!(is_media_file(Path::new("movie.mkv")));
+        assert!(!is_video_file(Path::new("photo.png")));
+    }
+
+    #[test]
+    fn video_container_extension_for_mkv() {
+        assert_eq!(video_container_extension("clip.mkv"), "mkv");
+        assert_eq!(video_container_extension("path/to/video.MKV"), "mkv");
+        assert_eq!(video_container_extension("unknown.bin"), "mp4");
+    }
+}

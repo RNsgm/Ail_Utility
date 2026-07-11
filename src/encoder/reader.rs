@@ -3,9 +3,11 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 #[cfg(feature = "ffmpeg")]
+use crate::encoder::temp_video_path;
+#[cfg(feature = "ffmpeg")]
 use crate::encoder::video_convert::{convert_to_mp4, is_tts_file, mp4_output_path};
 use crate::encoder::{
-    is_media_file, AilBuilder, ArchiveType, CompressionType, EncoderError, MediaType,
+    is_media_file, is_video_file, AilBuilder, ArchiveType, CompressionType, EncoderError, MediaType,
 };
 
 /// Настройки кодирования
@@ -66,6 +68,43 @@ impl EncodeOptions {
     }
 }
 
+enum MediaItem {
+    Image { name: String, data: Vec<u8> },
+    Video { name: String, data: Vec<u8> },
+}
+
+fn push_media_item(items: &mut Vec<MediaItem>, name: String, data: Vec<u8>) {
+    if is_video_file(&name) {
+        items.push(MediaItem::Video { name, data });
+    } else {
+        items.push(MediaItem::Image { name, data });
+    }
+}
+
+fn add_media_items_to_builder(
+    builder: &mut AilBuilder,
+    items: Vec<MediaItem>,
+    compression: CompressionType,
+) -> Result<(), EncoderError> {
+    for item in items {
+        match item {
+            MediaItem::Image { name, data } => builder.add_image(name, data, compression)?,
+            MediaItem::Video { name, data } => {
+                #[cfg(feature = "ffmpeg")]
+                builder.add_video_blob(name, data, compression)?;
+                #[cfg(not(feature = "ffmpeg"))]
+                {
+                    let _ = data;
+                    return Err(EncoderError::VideoConvert(format!(
+                        "Video file \"{name}\" requires ffmpeg feature"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Кодирует архив (zip или rar) в файл .ail
 pub fn encode_archive_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
@@ -95,12 +134,10 @@ pub fn encode_archive_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
         return Err(EncoderError::NoImagesFound);
     }
 
-    // Сортировка по имени файла если нужно
     if options.sort_by_name {
         images.sort_by(|a, b| alphanumeric_sort::compare_str(&a.0, &b.0));
     }
 
-    // Добавляем изображения в билдер
     for (name, data) in images {
         builder.add_image(name, data, options.compression)?;
     }
@@ -123,7 +160,7 @@ pub fn encode_from_directory<P: AsRef<Path>, Q: AsRef<Path>>(
 ) -> Result<(), EncoderError> {
     let options = options.unwrap_or_default();
     let mut builder = AilBuilder::new().with_thumbnail_size(options.thumbnail_size);
-    let mut images: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut items: Vec<MediaItem> = Vec::new();
 
     let dir = std::fs::read_dir(dir_path)?;
 
@@ -146,22 +183,26 @@ pub fn encode_from_directory<P: AsRef<Path>, Q: AsRef<Path>>(
             .unwrap_or_else(|| "unknown".to_string());
 
         let data = std::fs::read(&path)?;
-        images.push((name, data));
+        push_media_item(&mut items, name, data);
     }
 
-    if images.is_empty() {
+    if items.is_empty() {
         return Err(EncoderError::NoImagesFound);
     }
 
-    // Сортировка по имени файла если нужно
     if options.sort_by_name {
-        images.sort_by(|a, b| alphanumeric_sort::compare_str(&a.0, &b.0));
+        items.sort_by(|a, b| {
+            let name_a = match a {
+                MediaItem::Image { name, .. } | MediaItem::Video { name, .. } => name,
+            };
+            let name_b = match b {
+                MediaItem::Image { name, .. } | MediaItem::Video { name, .. } => name,
+            };
+            alphanumeric_sort::compare_str(name_a, name_b)
+        });
     }
 
-    // Добавляем изображения в билдер
-    for (name, data) in images {
-        builder.add_image(name, data, options.compression)?;
-    }
+    add_media_items_to_builder(&mut builder, items, options.compression)?;
 
     // Создаем выходной файл
     let output_file = File::create(output_path)?;
@@ -185,17 +226,14 @@ fn read_zip_archive<P: AsRef<Path>>(
         let mut file = archive.by_index(i)?;
         let name = file.name().to_string();
 
-        // Проверяем, является ли файл изображением
-        if !is_media_file(&name) {
+        if !crate::encoder::is_image_file(&name) {
             continue;
         }
 
-        // Пропускаем директории
         if file.is_dir() {
             continue;
         }
 
-        // Читаем данные файла
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
 
@@ -244,8 +282,7 @@ fn read_rar_entries(
         let filename = entry.filename.to_string_lossy().to_string();
 
         // Проверяем, является ли файл изображением
-        if is_media_file(&filename) && !entry.is_directory() {
-            // Читаем данные файла
+        if crate::encoder::is_image_file(&filename) && !entry.is_directory() {
             let (data, next_archive) = archive_with_file
                 .read()
                 .map_err(|e| EncoderError::Rar(format!("RAR read data error: {:?}", e)))?;
@@ -283,9 +320,9 @@ fn read_7z_archive<P: AsRef<Path>>(
 ) -> Result<(), EncoderError> {
     sevenz_rust::decompress_file_with_extract_fn(path, "", |entry, reader, _| {
         let name = entry.name().to_string();
-        if is_media_file(&name) && !entry.is_directory() {
+        if crate::encoder::is_image_file(&name) && !entry.is_directory() {
             let mut data = Vec::new();
-            if reader.read_to_end(&mut data).is_ok() {
+            if reader.read_to_end(&mut data).is_ok() && !data.is_empty() {
                 images.push((name, data));
             }
         }
@@ -343,7 +380,10 @@ fn decode_gif_frames(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, EncoderError
 
 /// Извлекает кадры из видео через FFmpeg (каждый N-й кадр, макс 300)
 #[cfg(feature = "ffmpeg")]
-fn decode_video_frames(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, EncoderError> {
+fn decode_video_frames(
+    data: &[u8],
+    name_hint: &str,
+) -> Result<Vec<(String, Vec<u8>)>, EncoderError> {
     use ffmpeg_next::{codec, format, frame, software::scaling, util::format::Pixel};
     use std::io::Cursor;
 
@@ -357,7 +397,7 @@ fn decode_video_frames(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, EncoderErr
         ))
     })?;
 
-    let temp_path = std::env::temp_dir().join(format!("ail_encode_vid_{}.mp4", std::process::id()));
+    let temp_path = temp_video_path("ail_encode_vid", name_hint);
     std::fs::write(&temp_path, data).map_err(|e| {
         EncoderError::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -674,7 +714,7 @@ pub fn list_media_in_archive<P: AsRef<Path>>(archive_path: P) -> Result<Vec<Stri
                 let file = archive.by_index(i)?;
                 let name = file.name().to_string();
 
-                if is_media_file(&name) && !file.is_dir() {
+                if crate::encoder::is_image_file(&name) && !file.is_dir() {
                     images.push(name);
                 }
             }
@@ -692,7 +732,7 @@ pub fn list_media_in_archive<P: AsRef<Path>>(archive_path: P) -> Result<Vec<Stri
                         .map_err(|e| EncoderError::Rar(format!("RAR list error: {:?}", e)))?;
                     let filename = entry.filename.to_string_lossy().to_string();
 
-                    if is_media_file(&filename) && !entry.is_directory() {
+                    if crate::encoder::is_image_file(&filename) && !entry.is_directory() {
                         images.push(filename);
                     }
                 }
@@ -707,7 +747,7 @@ pub fn list_media_in_archive<P: AsRef<Path>>(archive_path: P) -> Result<Vec<Stri
         ArchiveType::SevenZip => {
             sevenz_rust::decompress_file_with_extract_fn(&archive_path, "", |entry, _reader, _| {
                 let name = entry.name().to_string();
-                if is_media_file(&name) && !entry.is_directory() {
+                if crate::encoder::is_image_file(&name) && !entry.is_directory() {
                     images.push(name);
                 }
                 Ok(true)

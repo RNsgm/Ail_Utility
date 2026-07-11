@@ -42,6 +42,12 @@ pub fn convert_to_mp4<P: AsRef<Path>, Q: AsRef<Path>>(
     let input = input.as_ref();
     let output = output.as_ref();
 
+    crate::log_info!(
+        "convert_to_mp4: {} -> {}",
+        input.display(),
+        output.display()
+    );
+
     if output.exists() {
         return Err(EncoderError::VideoConvert(format!(
             "Output already exists: {}",
@@ -63,13 +69,24 @@ pub fn convert_to_mp4<P: AsRef<Path>, Q: AsRef<Path>>(
     ];
 
     if output.exists() {
+        crate::log_info!("convert_to_mp4: OK {}", output.display());
         return Ok(());
     }
 
     let details: Vec<String> = errors
         .into_iter()
-        .filter_map(|e| e.err().map(|e| e.to_string()))
+        .filter_map(|e| {
+            if let Err(ref err) = e {
+                crate::log_warn!("convert_to_mp4 attempt failed: {err}");
+            }
+            e.err().map(|e| e.to_string())
+        })
         .collect();
+    crate::log_error!(
+        "convert_to_mp4: all strategies failed for {}: {}",
+        input.display(),
+        details.join("; ")
+    );
     Err(EncoderError::VideoConvert(format!(
         "Failed to convert {}: {}",
         input.display(),

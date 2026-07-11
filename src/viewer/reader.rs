@@ -5,6 +5,7 @@ use crate::viewer::texture_loader::{
 };
 use crate::viewer::thread_util::spawn_worker;
 use crate::viewer::video_player::VideoPlayer;
+use crate::{log_error, log_info};
 use egui::{Context, Key, RichText, Ui, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -144,9 +145,19 @@ impl ReaderView {
                             page_idx
                         );
                         let temp_path = std::env::temp_dir().join(&temp_name);
-                        if std::fs::write(&temp_path, &data).is_ok() {
-                            let _ = tx.send(LoadMessage::VideoTempPath(temp_path));
-                            ctx_clone.request_repaint();
+                        log_info!(
+                            "Reader: video page={page_idx} name={name} ext={ext} size={} -> {}",
+                            data.len(),
+                            temp_path.display()
+                        );
+                        match std::fs::write(&temp_path, &data) {
+                            Ok(()) => {
+                                let _ = tx.send(LoadMessage::VideoTempPath(temp_path));
+                                ctx_clone.request_repaint();
+                            }
+                            Err(e) => {
+                                log_error!("Reader: failed to write video temp file: {e}");
+                            }
                         }
                     } else if media_type.is_gif() {
                         if let Some(frames) = load_gif_color_images(&data) {

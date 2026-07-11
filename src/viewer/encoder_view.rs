@@ -1,6 +1,4 @@
-use crate::encoder::{
-    encode_media_to_ail, is_media_file, ArchiveType, CompressionType, EncodeOptions,
-};
+use crate::encoder::{encode_media_to_ail, CompressionType, EncodeOptions};
 use egui::{Color32, Context, RichText, Ui};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -17,20 +15,20 @@ enum EncodeMessage {
 }
 
 pub struct EncoderView {
-    input_files: Vec<PathBuf>,
+    input_paths: Vec<PathBuf>,
     output_dir: Option<PathBuf>,
     options: EncodeOptions,
     is_encoding: bool,
     progress: (usize, usize),
     current_file: String,
-    logs: Vec<(String, bool)>, // (message, is_error)
+    logs: Vec<(String, bool)>,
     receiver: Option<Receiver<EncodeMessage>>,
 }
 
 impl EncoderView {
     pub fn new() -> Self {
         Self {
-            input_files: Vec::new(),
+            input_paths: Vec::new(),
             output_dir: None,
             options: EncodeOptions::default(),
             is_encoding: false,
@@ -45,35 +43,44 @@ impl EncoderView {
         self.process_messages();
 
         ui.vertical(|ui| {
-            ui.heading("Кодировщик архивов в .ail");
+            ui.heading("Кодировщик в .ail");
             ui.add_space(10.0);
 
             ui.group(|ui| {
-                ui.label("1. Выбор файлов");
+                ui.label("1. Выбор файлов и папок");
                 ui.horizontal(|ui| {
-                    if ui.button("➕ Добавить архивы").clicked() {
-                        if let Some(files) = rfd::FileDialog::new()
-                            .add_filter(
-                                "Архивы и медиа",
-                                &[
-                                    "zip", "rar", "7z", "gif", "mp4", "webm", "avi", "mov", "mkv",
-                                ],
-                            )
-                            .pick_files()
-                        {
-                            self.input_files.extend(files);
+                    if ui.button("➕ Добавить файлы").clicked() {
+                        if let Some(files) = rfd::FileDialog::new().pick_files() {
+                            self.add_paths(files);
                         }
                     }
                     if ui.button("📁 Добавить папку").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.add_from_folder(folder);
+                            self.add_paths([folder]);
                         }
                     }
                     if ui.button("🗑 Очистить").clicked() {
-                        self.input_files.clear();
+                        self.input_paths.clear();
                     }
                 });
-                ui.label(format!("Выбрано файлов: {}", self.input_files.len()));
+
+                let (files, folders) = self.count_inputs();
+                ui.label(format!("Выбрано: {} файлов, {} папок", files, folders));
+
+                if !self.input_paths.is_empty() {
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            for path in &self.input_paths {
+                                let label = if path.is_dir() {
+                                    format!("📁 {}", path.display())
+                                } else {
+                                    format!("📄 {}", path.display())
+                                };
+                                ui.label(label);
+                            }
+                        });
+                }
             });
 
             ui.add_space(5.0);
@@ -90,7 +97,7 @@ impl EncoderView {
                         ui.label(dir.to_string_lossy());
                     } else {
                         ui.label(
-                            RichText::new("Не выбрана (будет рядом с архивом)")
+                            RichText::new("Не выбрана (будет рядом с исходником)")
                                 .color(Color32::GOLD),
                         );
                     }
@@ -130,7 +137,7 @@ impl EncoderView {
                 );
                 ui.label(format!("Текущий: {}", self.current_file));
             } else {
-                let can_start = !self.input_files.is_empty();
+                let can_start = !self.input_paths.is_empty();
                 if ui
                     .add_enabled(
                         can_start,
@@ -159,39 +166,41 @@ impl EncoderView {
         });
     }
 
-    fn add_from_folder(&mut self, folder: PathBuf) {
-        if let Ok(entries) = std::fs::read_dir(folder) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file()
-                    && (ArchiveType::from_path(&path).is_some() || is_media_file(&path))
-                {
-                    self.input_files.push(path);
-                }
+    fn add_paths<I: IntoIterator<Item = PathBuf>>(&mut self, paths: I) {
+        for path in paths {
+            if self.input_paths.iter().any(|p| p == &path) {
+                continue;
             }
+            self.input_paths.push(path);
         }
     }
+
+    fn count_inputs(&self) -> (usize, usize) {
+        let folders = self.input_paths.iter().filter(|p| p.is_dir()).count();
+        let files = self.input_paths.len() - folders;
+        (files, folders)
+    }
+
     fn start_encoding(&mut self, ctx: &Context) {
         self.is_encoding = true;
-        self.progress = (0, self.input_files.len());
+        self.progress = (0, self.input_paths.len());
         self.logs.clear();
 
         let (tx, rx) = channel();
         self.receiver = Some(rx);
 
-        let files = self.input_files.clone();
+        let paths = self.input_paths.clone();
         let options = self.options.clone();
         let output_dir = self.output_dir.clone();
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let total = files.len();
-            for (i, path) in files.into_iter().enumerate() {
+            let total = paths.len();
+            for (i, path) in paths.into_iter().enumerate() {
                 let name = path
                     .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
                 let _ = tx.send(EncodeMessage::Progress {
                     current: i + 1,
                     total,
@@ -202,7 +211,19 @@ impl EncoderView {
                 let out_path = if let Some(ref dir) = output_dir {
                     dir.join(format!(
                         "{}.ail",
-                        path.file_stem().unwrap_or_default().to_string_lossy()
+                        path.file_stem()
+                            .map(|s| s.to_string_lossy())
+                            .unwrap_or_else(|| path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy())
+                    ))
+                } else if path.is_dir() {
+                    path.join(format!(
+                        "{}.ail",
+                        path.file_name()
+                            .map(|s| s.to_string_lossy())
+                            .unwrap_or_default()
                     ))
                 } else {
                     path.with_extension("ail")

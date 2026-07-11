@@ -2,7 +2,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use crate::encoder::{is_media_file, AilBuilder, ArchiveType, CompressionType, EncoderError};
+use crate::encoder::{
+    is_media_file, AilBuilder, ArchiveType, CompressionType, EncoderError, MediaType,
+};
 
 /// Настройки кодирования
 #[derive(Debug, Clone)]
@@ -490,7 +492,7 @@ fn decode_video_frames(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, EncoderErr
 
     Ok(frames)
 }
-/// Кодирует архив или медиа-файл (GIF/видео) в .ail
+/// Кодирует архив, медиа-файл или папку в .ail
 pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
     input_path: P,
     output_path: Q,
@@ -498,6 +500,28 @@ pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
 ) -> Result<(), EncoderError> {
     let options = options.unwrap_or_default();
     let input_path = input_path.as_ref();
+
+    if input_path.is_dir() {
+        return encode_from_directory(input_path, output_path, Some(options));
+    }
+
+    if matches!(MediaType::from_path(input_path), MediaType::Image) {
+        let data = std::fs::read(input_path)?;
+        let name = input_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("image")
+            .to_string();
+
+        let mut builder = AilBuilder::new().with_thumbnail_size(options.thumbnail_size);
+        builder.add_image(name, data, options.compression)?;
+
+        let output_file = File::create(output_path)?;
+        let mut writer = std::io::BufWriter::new(output_file);
+        builder.build(&mut writer)?;
+        writer.flush()?;
+        return Ok(());
+    }
 
     let ext = input_path
         .extension()

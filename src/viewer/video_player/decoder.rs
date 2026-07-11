@@ -9,7 +9,7 @@ use crate::{log_error, log_info};
 
 use super::presenter::DecodedFrame;
 
-const FRAME_BUFFER: usize = 8;
+const FRAME_BUFFER: usize = 16;
 
 pub struct VideoDecoder {
     receiver: Receiver<DecodedFrame>,
@@ -193,6 +193,7 @@ struct DecoderState {
     start_secs: f64,
     fps: f64,
     frames_emitted: u64,
+    pts_origin: Option<f64>,
     waiting_keyframe: bool,
 }
 
@@ -265,6 +266,7 @@ impl DecoderState {
             start_secs,
             fps,
             frames_emitted: 0,
+            pts_origin: None,
             waiting_keyframe,
         })
     }
@@ -306,9 +308,12 @@ impl DecoderState {
                     continue;
                 }
 
-                let pts = raw_pts.unwrap_or_else(|| {
+                let pts = if let Some(raw) = raw_pts {
+                    let origin = *self.pts_origin.get_or_insert(raw);
+                    self.start_secs + (raw - origin).max(0.0)
+                } else {
                     self.start_secs + self.frames_emitted as f64 / self.fps
-                });
+                };
                 self.frames_emitted += 1;
 
                 let mut rgb_frame = frame::Video::empty();

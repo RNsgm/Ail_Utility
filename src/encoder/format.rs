@@ -1,4 +1,4 @@
-﻿use std::io::{Read, Write};
+use std::io::{Read, Write};
 
 use super::{EncoderError, AIL_MAGIC, AIL_VERSION};
 
@@ -242,7 +242,11 @@ impl AilThumbnail {
 
     /// Создает превью из первого кадра видео через FFmpeg
     #[cfg(feature = "ffmpeg")]
-    pub fn from_video(video_data: &[u8], max_size: u32) -> Result<Self, EncoderError> {
+    pub fn from_video(
+        video_data: &[u8],
+        max_size: u32,
+        name_hint: Option<&str>,
+    ) -> Result<Self, EncoderError> {
         use ffmpeg_next::codec;
         use ffmpeg_next::format;
         use ffmpeg_next::frame;
@@ -256,8 +260,9 @@ impl AilThumbnail {
             ))
         })?;
 
-        // Записываем во временный файл
-        let temp_path = std::env::temp_dir().join("ail_video_thumb.mp4");
+        // Записываем во временный файл с корректным расширением (mkv, mp4, …)
+        let hint = name_hint.unwrap_or("video.mp4");
+        let temp_path = crate::encoder::temp_video_path("ail_video_thumb", hint);
         std::fs::write(&temp_path, video_data).map_err(|e| {
             EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -756,7 +761,8 @@ impl AilBuilder {
         if self.thumbnail.is_none() {
             #[cfg(feature = "ffmpeg")]
             {
-                match AilThumbnail::from_video(&data, self.thumbnail_max_size) {
+                match AilThumbnail::from_video(&data, self.thumbnail_max_size, Some(&original_name))
+                {
                     Ok(thumb) => {
                         self.thumbnail = Some(thumb);
                     }

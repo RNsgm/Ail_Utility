@@ -150,6 +150,7 @@ impl GalleryView {
 
         theme::toolbar_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
+                ui.add_space(theme::CONTENT_PAD - 12.0);
                 ui.label(
                     RichText::new("Галерея")
                         .size(18.0)
@@ -184,31 +185,38 @@ impl GalleryView {
                         egui::Slider::new(&mut self.thumbnail_size, 100.0..=400.0)
                             .text("Размер"),
                     );
+                    ui.add_space(theme::CONTENT_PAD - 12.0);
                 });
             });
         });
 
-        ui.add_space(8.0);
+        ui.add_space(12.0);
 
-        if self.ail_files.is_empty() && !self.loading {
-            if self.current_folder.is_none() {
-                theme::empty_state(
-                    ui,
-                    "Выберите папку",
-                    "Откройте каталог с .ail файлами для просмотра",
-                );
-            } else {
-                theme::empty_state(ui, "Нет .ail файлов", "В этой папке нет архивов AIL");
-            }
-        } else if self.loading && self.ail_files.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(100.0);
-                ui.spinner();
-                ui.label(RichText::new("Сканирование…").color(theme::text_muted()));
+        ui.horizontal(|ui| {
+            ui.add_space(theme::CONTENT_PAD);
+            ui.vertical(|ui| {
+                if self.ail_files.is_empty() && !self.loading {
+                    if self.current_folder.is_none() {
+                        theme::empty_state(
+                            ui,
+                            "Выберите папку",
+                            "Откройте каталог с .ail файлами для просмотра",
+                        );
+                    } else {
+                        theme::empty_state(ui, "Нет .ail файлов", "В этой папке нет архивов AIL");
+                    }
+                } else if self.loading && self.ail_files.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(100.0);
+                        ui.spinner();
+                        ui.label(RichText::new("Сканирование…").color(theme::text_muted()));
+                    });
+                } else {
+                    self.render_grid(ctx, ui, &mut response);
+                }
             });
-        } else {
-            self.render_grid(ctx, ui, &mut response);
-        }
+            ui.add_space(theme::CONTENT_PAD);
+        });
 
         response
     }

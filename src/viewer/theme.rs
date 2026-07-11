@@ -7,6 +7,10 @@ use egui::{
 pub const NAV_WIDTH: f32 = 200.0;
 pub const CARD_RADIUS: f32 = 10.0;
 pub const THUMB_RADIUS: f32 = 10.0;
+pub const CONTENT_PAD: f32 = 28.0;
+pub const SECTION_GAP: f32 = 16.0;
+pub const CARD_INNER_X: i8 = 22;
+pub const CARD_INNER_Y: i8 = 18;
 
 pub fn bg() -> Color32 {
     Color32::from_rgb(16, 18, 24)
@@ -70,12 +74,12 @@ pub fn log_err() -> Color32 {
 
 pub fn apply(ctx: &Context) {
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = Vec2::new(10.0, 8.0);
-    style.spacing.button_padding = Vec2::new(12.0, 7.0);
-    style.spacing.indent = 18.0;
-    style.spacing.slider_width = 140.0;
-    style.spacing.window_margin = Margin::same(12);
-    style.spacing.menu_margin = Margin::same(8);
+    style.spacing.item_spacing = Vec2::new(12.0, 12.0);
+    style.spacing.button_padding = Vec2::new(14.0, 9.0);
+    style.spacing.indent = 20.0;
+    style.spacing.slider_width = 160.0;
+    style.spacing.window_margin = Margin::same(16);
+    style.spacing.menu_margin = Margin::same(10);
 
     let mut visuals = egui::Visuals::dark();
     visuals.override_text_color = Some(text());
@@ -116,26 +120,46 @@ pub fn card_frame() -> Frame {
     Frame::new()
         .fill(card())
         .corner_radius(CornerRadius::same(CARD_RADIUS as u8))
-        .inner_margin(14.0)
+        .inner_margin(Margin::symmetric(CARD_INNER_X, CARD_INNER_Y))
         .stroke(Stroke::new(1.0, border()))
 }
 
 pub fn section_card<R>(ui: &mut Ui, title: &str, add_body: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.add_space(SECTION_GAP);
     card_frame().show(ui, |ui| {
         ui.label(RichText::new(title).strong().size(15.0).color(text()));
-        ui.add_space(8.0);
-        add_body(ui)
+        ui.add_space(12.0);
+        let spacing = ui.spacing().item_spacing;
+        ui.spacing_mut().item_spacing = Vec2::new(spacing.x, 12.0);
+        let result = add_body(ui);
+        ui.spacing_mut().item_spacing = spacing;
+        result
     })
     .inner
+}
+
+pub fn inset_content<R>(ui: &mut Ui, add_body: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.add_space(16.0);
+    ui.horizontal(|ui| {
+        ui.add_space(CONTENT_PAD);
+        let result = ui.vertical(add_body).inner;
+        ui.add_space(CONTENT_PAD);
+        result
+    })
+    .inner
+}
+
+pub fn row_gap(ui: &mut Ui, gap: f32) {
+    ui.add_space(gap);
 }
 
 pub fn page_header(ui: &mut Ui, title: &str, subtitle: Option<&str>) {
     ui.label(RichText::new(title).size(22.0).strong().color(text()));
     if let Some(sub) = subtitle {
-        ui.add_space(2.0);
+        ui.add_space(6.0);
         ui.label(RichText::new(sub).color(text_muted()));
     }
-    ui.add_space(12.0);
+    ui.add_space(18.0);
 }
 
 pub fn toolbar_frame() -> Frame {
@@ -222,15 +246,18 @@ pub fn empty_state(ui: &mut Ui, title: &str, hint: &str) {
 }
 
 pub fn log_panel(ui: &mut Ui, max_height: f32, logs: &[(String, bool)]) {
+    ui.add_space(16.0);
     ui.label(RichText::new("Лог").strong().color(text_muted()));
+    ui.add_space(8.0);
     Frame::new()
         .fill(Color32::from_rgb(14, 16, 20))
         .corner_radius(CornerRadius::same(8))
-        .inner_margin(10.0)
+        .inner_margin(Margin::symmetric(14, 12))
         .stroke(Stroke::new(1.0, border()))
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .max_height(max_height)
+                .min_scrolled_height(72.0)
                 .show(ui, |ui| {
                     if logs.is_empty() {
                         ui.label(RichText::new("Пока пусто").italics().color(text_muted()));

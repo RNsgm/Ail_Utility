@@ -45,104 +45,109 @@ impl ConverterView {
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) {
         self.process_messages();
 
-        ui.add_space(8.0);
-        ui.vertical(|ui| {
-            theme::page_header(
-                ui,
-                "Конвертер TTS → MP4",
-                Some("Файлы .tts и .mp4.tts → обычный MP4"),
-            );
-
-            theme::section_card(ui, "1. Источники", |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("➕ Файлы").clicked() {
-                        if let Some(files) = rfd::FileDialog::new().pick_files() {
-                            self.add_paths(files);
-                        }
-                    }
-                    if ui.button("📁 Папка").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.add_paths([folder]);
-                        }
-                    }
-                    if ui.button("🔍 Найти TTS").clicked() {
-                        self.scan_for_convertible();
-                    }
-                    if ui.button("🗑 Очистить").clicked() {
-                        self.input_paths.clear();
-                    }
-                });
-
-                let convertible = self.count_convertible();
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Источников: {}, к конвертации: {convertible}",
-                        self.input_paths.len()
-                    ))
-                    .color(theme::text_muted()),
+        theme::inset_content(ui, |ui| {
+            ui.vertical(|ui| {
+                theme::page_header(
+                    ui,
+                    "Конвертер TTS → MP4",
+                    Some("Файлы .tts и .mp4.tts → обычный MP4"),
                 );
 
-                if !self.input_paths.is_empty() {
-                    egui::ScrollArea::vertical()
-                        .max_height(120.0)
-                        .show(ui, |ui| {
-                            for path in &self.input_paths {
-                                let icon = if path.is_dir() { "📁" } else { "📄" };
-                                let tag = if path.is_file() && needs_mp4_conversion(path) {
-                                    " [TTS]"
-                                } else {
-                                    ""
-                                };
-                                ui.label(format!("{icon} {}{tag}", path.display()));
+                theme::section_card(ui, "1. Источники", |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("➕ Файлы").clicked() {
+                            if let Some(files) = rfd::FileDialog::new().pick_files() {
+                                self.add_paths(files);
                             }
-                        });
-                }
-            });
-
-            ui.add_space(8.0);
-
-            theme::section_card(ui, "2. Папка сохранения", |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("📁 Выбрать").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.output_dir = Some(folder);
                         }
-                    }
-                    if let Some(dir) = &self.output_dir {
-                        ui.label(dir.to_string_lossy());
-                    } else {
-                        ui.label(
-                            egui::RichText::new("Не выбрана — MP4 рядом с исходником")
-                                .color(theme::text_hint()),
-                        );
+                        if ui.button("📁 Папка").clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                self.add_paths([folder]);
+                            }
+                        }
+                        if ui.button("🔍 Найти TTS").clicked() {
+                            self.scan_for_convertible();
+                        }
+                        if ui.button("🗑 Очистить").clicked() {
+                            self.input_paths.clear();
+                        }
+                    });
+
+                    theme::row_gap(ui, 10.0);
+
+                    let convertible = self.count_convertible();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Источников: {}, к конвертации: {convertible}",
+                            self.input_paths.len()
+                        ))
+                        .color(theme::text_muted()),
+                    );
+
+                    if !self.input_paths.is_empty() {
+                        theme::row_gap(ui, 8.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                for path in &self.input_paths {
+                                    let icon = if path.is_dir() { "📁" } else { "📄" };
+                                    let tag = if path.is_file() && needs_mp4_conversion(path) {
+                                        " [TTS]"
+                                    } else {
+                                        ""
+                                    };
+                                    ui.label(format!("{icon} {}{tag}", path.display()));
+                                }
+                            });
                     }
                 });
-            });
 
-            ui.add_space(12.0);
+                theme::section_card(ui, "2. Папка сохранения", |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("📁 Выбрать").clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                self.output_dir = Some(folder);
+                            }
+                        }
+                        if let Some(dir) = &self.output_dir {
+                            ui.label(dir.to_string_lossy());
+                        } else {
+                            ui.label(
+                                egui::RichText::new("Не выбрана — MP4 рядом с исходником")
+                                    .color(theme::text_hint()),
+                            );
+                        }
+                    });
+                });
 
-            if self.is_converting {
-                ui.add(
-                    egui::ProgressBar::new(self.progress.0 as f32 / self.progress.1.max(1) as f32)
+                theme::row_gap(ui, 20.0);
+
+                if self.is_converting {
+                    ui.add(
+                        egui::ProgressBar::new(
+                            self.progress.0 as f32 / self.progress.1.max(1) as f32,
+                        )
                         .text(format!(
                             "Конвертация {}/{}",
                             self.progress.0, self.progress.1
                         ))
                         .fill(theme::accent()),
-                );
-                ui.label(
-                    egui::RichText::new(format!("Текущий: {}", self.current_file))
-                        .color(theme::text_muted()),
-                );
-            } else {
-                let can_start = self.count_convertible() > 0;
-                if primary_button(ui, "🎬 Конвертировать в MP4", can_start).clicked() {
-                    self.start_conversion(ctx);
+                    );
+                    theme::row_gap(ui, 8.0);
+                    ui.label(
+                        egui::RichText::new(format!("Текущий: {}", self.current_file))
+                            .color(theme::text_muted()),
+                    );
+                } else {
+                    let can_start = self.count_convertible() > 0;
+                    if primary_button(ui, "🎬 Конвертировать в MP4", can_start).clicked() {
+                        self.start_conversion(ctx);
+                    }
                 }
-            }
 
-            ui.add_space(12.0);
-            theme::log_panel(ui, 200.0, &self.logs);
+                theme::log_panel(ui, 200.0, &self.logs);
+                ui.add_space(20.0);
+            });
         });
     }
 

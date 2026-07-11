@@ -262,6 +262,15 @@ impl ConverterView {
                     mp4_output_path(&path)
                 };
 
+                if out_path.is_file() {
+                    let _ = tx.send(ConvertMessage::Skipped(format!(
+                        "{name} (уже есть: {})",
+                        out_path.display()
+                    )));
+                    ctx.request_repaint();
+                    continue;
+                }
+
                 match convert_to_mp4(&path, &out_path) {
                     Ok(_) => {
                         let _ = tx.send(ConvertMessage::Success(format!(

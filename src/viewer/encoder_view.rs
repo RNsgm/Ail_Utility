@@ -1,4 +1,6 @@
-use crate::encoder::{collect_encoding_jobs, encode_media_to_ail, CompressionType, EncodeOptions};
+use crate::encoder::{
+    collect_encoding_jobs, encode_media_to_ail, CompressionType, EncodeOptions, EncodeStatus,
+};
 use egui::{Color32, Context, RichText, Ui};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -10,6 +12,7 @@ enum EncodeMessage {
         name: String,
     },
     Success(String),
+    Skipped(String),
     Error(String, String),
     Done,
 }
@@ -138,6 +141,10 @@ impl EncoderView {
                     egui::Slider::new(&mut self.options.thumbnail_size, 100..=600)
                         .text("Размер превью"),
                 );
+                ui.checkbox(
+                    &mut self.options.skip_existing,
+                    "Пропускать уже существующие .ail",
+                );
             });
 
             ui.add_space(10.0);
@@ -222,9 +229,16 @@ impl EncoderView {
                 ctx.request_repaint();
 
                 match encode_media_to_ail(&job.input, &job.output, Some(options.clone())) {
-                    Ok(_) => {
+                    Ok(EncodeStatus::Created) => {
                         let _ = tx.send(EncodeMessage::Success(format!(
                             "{} → {}",
+                            job.label,
+                            job.output.display()
+                        )));
+                    }
+                    Ok(EncodeStatus::Skipped) => {
+                        let _ = tx.send(EncodeMessage::Skipped(format!(
+                            "{} (уже есть: {})",
                             job.label,
                             job.output.display()
                         )));
@@ -255,6 +269,9 @@ impl EncoderView {
                     }
                     EncodeMessage::Success(name) => {
                         self.logs.push((format!("✅ Готово: {}", name), false));
+                    }
+                    EncodeMessage::Skipped(name) => {
+                        self.logs.push((format!("⏭ Пропущен: {}", name), false));
                     }
                     EncodeMessage::Error(name, err) => {
                         self.logs

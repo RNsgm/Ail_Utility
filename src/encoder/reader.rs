@@ -19,7 +19,17 @@ pub struct EncodeOptions {
     pub base_name: Option<String>,
     /// Размер превью (по умолчанию 300)
     pub thumbnail_size: u32,
+    /// Пропускать, если выходной `.ail` уже существует
+    pub skip_existing: bool,
 }
+
+/// Результат одного задания кодирования
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeStatus {
+    Created,
+    Skipped,
+}
+
 impl Default for EncodeOptions {
     fn default() -> Self {
         Self {
@@ -27,6 +37,7 @@ impl Default for EncodeOptions {
             sort_by_name: true,
             base_name: None,
             thumbnail_size: 300,
+            skip_existing: true,
         }
     }
 }
@@ -43,9 +54,7 @@ impl EncodeOptions {
     pub fn lz4() -> Self {
         Self {
             compression: CompressionType::Lz4,
-            sort_by_name: true,
-            base_name: None,
-            thumbnail_size: 300,
+            ..Default::default()
         }
     }
 
@@ -53,9 +62,7 @@ impl EncodeOptions {
     pub fn zstd() -> Self {
         Self {
             compression: CompressionType::Zstd,
-            sort_by_name: true,
-            base_name: None,
-            thumbnail_size: 300,
+            ..Default::default()
         }
     }
 
@@ -545,12 +552,18 @@ pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
     input_path: P,
     output_path: Q,
     options: Option<EncodeOptions>,
-) -> Result<(), EncoderError> {
+) -> Result<EncodeStatus, EncoderError> {
     let options = options.unwrap_or_default();
     let input_path = input_path.as_ref();
+    let output_path = output_path.as_ref();
+
+    if options.skip_existing && output_path.is_file() {
+        return Ok(EncodeStatus::Skipped);
+    }
 
     if input_path.is_dir() {
-        return encode_from_directory(input_path, output_path, Some(options));
+        encode_from_directory(input_path, output_path, Some(options))?;
+        return Ok(EncodeStatus::Created);
     }
 
     if matches!(MediaType::from_path(input_path), MediaType::Image) {
@@ -568,12 +581,13 @@ pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
         let mut writer = std::io::BufWriter::new(output_file);
         builder.build(&mut writer)?;
         writer.flush()?;
-        return Ok(());
+        return Ok(EncodeStatus::Created);
     }
 
     #[cfg(feature = "ffmpeg")]
     if MediaType::from_path(input_path).is_video() || is_tts_file(input_path) {
-        return encode_video_file_to_ail(input_path, output_path.as_ref(), &options);
+        encode_video_file_to_ail(input_path, output_path, &options)?;
+        return Ok(EncodeStatus::Created);
     }
 
     let ext = input_path
@@ -621,10 +635,10 @@ pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
     builder.build(&mut writer)?;
     writer.flush()?;
 
-    Ok(())
+    Ok(EncodeStatus::Created)
 }
 /// Результат пакетного кодирования
-pub type BatchEncodeResult = Vec<(String, Result<(), EncoderError>)>;
+pub type BatchEncodeResult = Vec<(String, Result<EncodeStatus, EncoderError>)>;
 
 /// Пакетное кодирование нескольких файлов
 pub fn batch_encode<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -712,4 +726,56 @@ pub fn list_media_in_archive<P: AsRef<Path>>(archive_path: P) -> Result<Vec<Stri
     }
 
     Ok(images)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn skips_existing_output_when_enabled() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("page.png");
+        let output = dir.path().join("page.ail");
+        fs::write(&input, b"png").unwrap();
+        fs::write(&output, b"existing ail").unwrap();
+
+        let status = encode_media_to_ail(
+            &input,
+            &output,
+            Some(EncodeOptions {
+                skip_existing: true,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(status, EncodeStatus::Skipped);
+        assert_eq!(fs::read(&output).unwrap(), b"existing ail");
+    }
+
+    #[test]
+    fn overwrites_existing_output_when_skip_disabled() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("page.png");
+        let output = dir.path().join("page.ail");
+        fs::write(&input, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+        fs::write(&output, b"existing ail").unwrap();
+
+        let status = encode_media_to_ail(
+            &input,
+            &output,
+            Some(EncodeOptions {
+                skip_existing: false,
+                compression: CompressionType::None,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(status, EncodeStatus::Created);
+        assert_ne!(fs::read(&output).unwrap(), b"existing ail");
+    }
 }

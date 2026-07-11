@@ -9,7 +9,7 @@ pub use format::{
 pub use jobs::{collect_encoding_jobs, EncodingJob};
 pub use reader::{
     batch_encode, encode_archive_to_ail, encode_from_directory, encode_media_to_ail,
-    list_media_in_archive, BatchEncodeResult, EncodeOptions,
+    list_media_in_archive, BatchEncodeResult, EncodeOptions, EncodeStatus,
 };
 pub use video_convert::{
     collect_convertible_files, convert_to_mp4, convert_to_mp4_if_needed, is_tts_file,

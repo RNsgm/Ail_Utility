@@ -1,0 +1,35 @@
+﻿{
+    // Используйте IntelliSense, чтобы узнать о возможных атрибутах.
+    // Наведите указатель мыши, чтобы просмотреть описания существующих атрибутов.
+    // Для получения дополнительной информации посетите: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+    
+        {
+            "name": "Debug executable 'ArchiveUtils'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=ArchiveUtils"
+                ]
+            },
+            "args": [],
+            "env": {
+                "FFMPEG_DIR": "${workspaceFolder}/ffmpeg"
+            }
+        },
+        {
+            "name": "Debug unit tests in executable 'ArchiveUtils'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=ArchiveUtils"
+                ]
+            }
+        }
+    ]
+}

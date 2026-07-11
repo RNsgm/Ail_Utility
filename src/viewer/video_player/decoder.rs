@@ -55,13 +55,7 @@ pub fn probe_fps(path: &PathBuf) -> f64 {
                 .streams()
                 .best(ffmpeg_next::media::Type::Video)
                 .ok_or_else(|| "No video stream".to_string())?;
-            let avg_rate = stream.avg_frame_rate();
-            let fps = if avg_rate.denominator() > 0 {
-                avg_rate.numerator() as f64 / avg_rate.denominator() as f64
-            } else {
-                30.0
-            };
-            Ok(fps.max(1.0))
+            Ok(stream_fps(&stream))
         })
         .unwrap_or(30.0);
     }
@@ -71,6 +65,25 @@ pub fn probe_fps(path: &PathBuf) -> f64 {
         let _ = path;
         30.0
     }
+}
+
+#[cfg(feature = "ffmpeg")]
+fn rational_fps(rate: ffmpeg_next::util::rational::Rational) -> Option<f64> {
+    if rate.numerator() > 0 && rate.denominator() > 0 {
+        let fps = rate.numerator() as f64 / rate.denominator() as f64;
+        if (1.0..=240.0).contains(&fps) {
+            return Some(fps);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "ffmpeg")]
+fn stream_fps(stream: &ffmpeg_next::format::stream::Stream) -> f64 {
+    rational_fps(stream.avg_frame_rate())
+        .or_else(|| rational_fps(stream.rate()))
+        .unwrap_or(30.0)
+        .max(1.0)
 }
 
 pub fn probe_duration(path: &PathBuf) -> f64 {
@@ -210,13 +223,7 @@ impl DecoderState {
             .stream(stream_index)
             .ok_or_else(|| "Missing video stream".to_string())?;
         let time_base = stream.time_base();
-        let avg_rate = stream.avg_frame_rate();
-        let fps = if avg_rate.denominator() > 0 {
-            avg_rate.numerator() as f64 / avg_rate.denominator() as f64
-        } else {
-            30.0
-        }
-        .max(1.0);
+        let fps = stream_fps(&stream);
 
         let decoder_ctx = codec::context::Context::from_parameters(stream.parameters())
             .map_err(|e| e.to_string())?;
@@ -299,7 +306,9 @@ impl DecoderState {
                     continue;
                 }
 
-                let pts = self.start_secs + self.frames_emitted as f64 / self.fps;
+                let pts = raw_pts.unwrap_or_else(|| {
+                    self.start_secs + self.frames_emitted as f64 / self.fps
+                });
                 self.frames_emitted += 1;
 
                 let mut rgb_frame = frame::Video::empty();

@@ -4,7 +4,7 @@ mod decoder;
 mod presenter;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use egui::{Context, TextureHandle};
 use crate::viewer::audio_player::AudioPlayer;
@@ -26,7 +26,6 @@ pub struct VideoPlayer {
     stream_ended: bool,
     audio: Option<AudioPlayer>,
     fps: f64,
-    last_presented: Option<Instant>,
     pub looping: bool,
     pub volume: f32,
 }
@@ -52,7 +51,6 @@ impl VideoPlayer {
             stream_ended: false,
             audio: None,
             fps,
-            last_presented: None,
             looping: false,
             volume: 1.0,
         };
@@ -69,7 +67,6 @@ impl VideoPlayer {
                 self.present_frame(ctx, frame);
                 self.awaiting_seek_frame = false;
                 self.stream_ended = false;
-                self.last_presented = Some(Instant::now());
             } else if self.buffer.is_disconnected() {
                 self.awaiting_seek_frame = false;
             } else {
@@ -81,11 +78,8 @@ impl VideoPlayer {
         if !self.clock.is_paused() && !self.stream_ended {
             if self.looping && self.clock.reached_end() {
                 self.seek_to(ctx, 0.0);
-            } else if self.should_present_frame() {
-                if let Some(frame) = self.buffer.take_latest() {
-                    self.present_frame(ctx, frame);
-                    self.last_presented = Some(Instant::now());
-                }
+            } else if let Some(frame) = self.buffer.take_due(self.clock.now()) {
+                self.present_frame(ctx, frame);
             }
         }
 
@@ -154,22 +148,14 @@ impl VideoPlayer {
         self.clock.seek(target);
         self.awaiting_seek_frame = true;
         self.stream_ended = false;
-        self.last_presented = None;
         self.buffer.reset_disconnect();
 
         self.sync_audio(target, was_paused);
         ctx.request_repaint();
     }
 
-    fn should_present_frame(&self) -> bool {
-        let interval = self.frame_interval();
-        self.last_presented
-            .map(|t| t.elapsed() >= interval)
-            .unwrap_or(true)
-    }
-
     fn frame_interval(&self) -> Duration {
-        Duration::from_secs_f64((1.0 / self.fps.max(1.0)).min(0.05))
+        Duration::from_secs_f64(1.0 / self.fps.max(1.0))
     }
 
     fn present_frame(&mut self, ctx: &Context, frame: DecodedFrame) {
@@ -218,6 +204,9 @@ impl VideoPlayer {
     fn schedule_repaint(&self, ctx: &Context) {
         if self.clock.is_paused() {
             ctx.request_repaint_after(Duration::from_millis(100));
+        } else if let Some(next_pts) = self.buffer.next_pts() {
+            let wait = (next_pts - self.clock.now()).max(0.0);
+            ctx.request_repaint_after(Duration::from_secs_f64(wait.min(0.05)));
         } else {
             ctx.request_repaint_after(self.frame_interval());
         }

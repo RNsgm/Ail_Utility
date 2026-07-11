@@ -1,8 +1,13 @@
 pub mod format;
 pub mod reader;
 
-pub use format::{AilFile, AilHeader, AilEntry, AilBuilder, AilThumbnail, CompressionType, EntryType};
-pub use reader::{encode_archive_to_ail, encode_media_to_ail, encode_from_directory, batch_encode, EncodeOptions, list_media_in_archive};
+pub use format::{
+    read_index_entries, AilBuilder, AilEntry, AilHeader, AilThumbnail, CompressionType, EntryType,
+};
+pub use reader::{
+    batch_encode, encode_archive_to_ail, encode_from_directory, encode_media_to_ail,
+    list_media_in_archive, EncodeOptions,
+};
 
 use std::path::Path;
 /// Типы поддерживаемых архивов
@@ -36,6 +41,7 @@ pub enum EncoderError {
     SevenZip(String),
     InvalidArchiveType,
     NoImagesFound,
+    Crypto(String),
 }
 
 impl std::fmt::Display for EncoderError {
@@ -47,6 +53,7 @@ impl std::fmt::Display for EncoderError {
             EncoderError::SevenZip(e) => write!(f, "7Z error: {}", e),
             EncoderError::InvalidArchiveType => write!(f, "Invalid or unsupported archive type"),
             EncoderError::NoImagesFound => write!(f, "No image files found in archive"),
+            EncoderError::Crypto(e) => write!(f, "Crypto error: {}", e),
         }
     }
 }
@@ -85,16 +92,19 @@ pub enum MediaType {
 impl MediaType {
     /// Определяет тип медиа по расширению файла
     pub fn from_path<P: AsRef<Path>>(path: P) -> Self {
-        let ext = path.as_ref()
+        let ext = path
+            .as_ref()
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        
+
         match ext.as_str() {
             "gif" => MediaType::Gif,
-            "mp4" | "webm" | "avi" | "mov" | "mkv" | "flv" | "wmv" | "m4v" | "ogv" | "mpeg" | "mpg" => MediaType::Video,
-            "jpg" | "jpeg" | "png" | "bmp" | "tiff" | "tif" | "webp" | "ico" | "svg" | "avif" | "heic" | "heif" => MediaType::Image,
+            "mp4" | "webm" | "avi" | "mov" | "mkv" | "flv" | "wmv" | "m4v" | "ogv" | "mpeg"
+            | "mpg" => MediaType::Video,
+            "jpg" | "jpeg" | "png" | "bmp" | "tiff" | "tif" | "webp" | "ico" | "svg" | "avif"
+            | "heic" | "heif" => MediaType::Image,
             _ => MediaType::Unknown,
         }
     }
@@ -106,21 +116,17 @@ impl MediaType {
     pub fn is_video(&self) -> bool {
         matches!(self, MediaType::Video)
     }
-
-    pub fn is_image(&self) -> bool {
-        matches!(self, MediaType::Image)
-    }
 }
 
 /// Проверяет, является ли файл медиа (изображение, GIF или видео) по расширению
 pub fn is_media_file<P: AsRef<Path>>(path: P) -> bool {
     const MEDIA_EXTENSIONS: &[&str] = &[
         // Изображения
-        "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "ico", "svg", "avif", "heic", "heif",
-        // Видео
+        "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "ico", "svg", "avif", "heic",
+        "heif", // Видео
         "mp4", "webm", "avi", "mov", "mkv", "flv", "wmv", "m4v", "ogv", "mpeg", "mpg",
     ];
-    
+
     if let Some(ext) = path.as_ref().extension() {
         let ext = ext.to_str().unwrap_or("").to_lowercase();
         MEDIA_EXTENSIONS.contains(&ext.as_str())

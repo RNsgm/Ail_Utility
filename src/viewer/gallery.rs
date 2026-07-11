@@ -1,8 +1,8 @@
+use crate::decoder::AilInfo;
+use crate::viewer::texture_loader::{load_color_images_from_memory, TextureCache};
+use egui::{Color32, Context, Key, Rect, RichText, Sense, Ui, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
-use egui::{Context, Ui, Vec2, RichText, Color32, Rect, Sense, Key};
-use crate::decoder::AilInfo;
-use crate::viewer::texture_loader::{TextureCache, load_color_images_from_memory};
 
 pub struct GalleryView {
     current_folder: Option<PathBuf>,
@@ -50,7 +50,8 @@ impl GalleryView {
                 .flatten()
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.path().extension()
+                    e.path()
+                        .extension()
                         .and_then(|ext| ext.to_str())
                         .map(|ext| ext.eq_ignore_ascii_case("ail"))
                         .unwrap_or(false)
@@ -62,12 +63,14 @@ impl GalleryView {
                 match AilInfo::from_path(path.clone()) {
                     Ok(info) => {
                         // Декодируем превью в пиксели прямо здесь, в фоне!
-                        let color_images = info.preview_data.as_ref()
+                        let color_images = info
+                            .preview_data
+                            .as_ref()
                             .map(|data| load_color_images_from_memory(data))
                             .unwrap_or_default();
-                        
+
                         let color_image = color_images.into_iter().next();
-                        
+
                         let _ = tx.send(GalleryMessage::FileLoaded(info, color_image));
                         ctx.request_repaint();
                     }
@@ -82,46 +85,41 @@ impl GalleryView {
     fn process_load_messages(&mut self, ctx: &Context) {
         // Берем receiver во временную переменную
         let receiver = self.load_receiver.take();
-        
+
         if let Some(rx) = receiver {
             let mut received_count = 0;
             while let Ok(msg) = rx.try_recv() {
                 match msg {
                     GalleryMessage::FileLoaded(info, color_image) => {
                         let texture_key = format!("thumb_{}", info.path.display());
-                        
+
                         // Если есть готовые пиксели, создаем текстуру мгновенно
                         if let Some(ci) = color_image {
-                            self.texture_cache.load_from_color_image(ctx, &texture_key, ci);
+                            let _ = self
+                                .texture_cache
+                                .load_from_color_image(ctx, &texture_key, ci);
                         }
-                        
+
                         self.ail_files.push(info);
                         received_count += 1;
                     }
                 }
-                if received_count >= 5 { break; } // Лимит на кадр для плавности
+                if received_count >= 5 {
+                    break;
+                } // Лимит на кадр для плавности
             }
-            
+
             // Сортируем если получили новые файлы
             if received_count > 0 {
-                self.ail_files.sort_by(|a, b| {
-                    alphanumeric_sort::compare_str(&a.name, &b.name)
-                });
+                self.ail_files
+                    .sort_by(|a, b| alphanumeric_sort::compare_str(&a.name, &b.name));
             }
-            
+
             // Возвращаем receiver обратно
             self.load_receiver = Some(rx);
         } else if self.loading {
             self.loading = false;
         }
-    }
-
-    pub fn has_selection(&self) -> bool {
-        self.selected_item.is_some()
-    }
-
-    pub fn selected_file(&self) -> Option<&AilInfo> {
-        self.selected_item.and_then(|i| self.ail_files.get(i))
     }
 
     pub fn clear_selection(&mut self) {
@@ -137,10 +135,18 @@ impl GalleryView {
         // Обработка скролла клавишами в библиотеке
         let scroll_delta = ctx.input(|i| {
             let mut delta = 0.0;
-            if i.key_down(Key::ArrowDown) { delta -= 40.0; }
-            if i.key_down(Key::ArrowUp) { delta += 40.0; }
-            if i.key_pressed(Key::PageDown) { delta -= 600.0; }
-            if i.key_pressed(Key::PageUp) { delta += 600.0; }
+            if i.key_down(Key::ArrowDown) {
+                delta -= 40.0;
+            }
+            if i.key_down(Key::ArrowUp) {
+                delta += 40.0;
+            }
+            if i.key_pressed(Key::PageDown) {
+                delta -= 600.0;
+            }
+            if i.key_pressed(Key::PageUp) {
+                delta += 600.0;
+            }
             delta
         });
 
@@ -161,7 +167,7 @@ impl GalleryView {
             if let Some(folder) = &self.current_folder {
                 ui.label(format!("📂 {}", folder.display()));
                 ui.separator();
-                
+
                 if self.loading {
                     ui.label(format!("Loading... {} found", self.ail_files.len()));
                 } else {
@@ -222,17 +228,22 @@ impl GalleryView {
 
                                 let (path, name, count, preview) = {
                                     let file = &self.ail_files[index];
-                                    (file.path.clone(), file.name.clone(), file.image_count, file.preview_data.clone())
+                                    (
+                                        file.path.clone(),
+                                        file.name.clone(),
+                                        file.image_count,
+                                        file.preview_data.clone(),
+                                    )
                                 };
 
                                 let clicked = self.render_thumbnail(
-                                    ctx, 
-                                    ui, 
-                                    index, 
-                                    &path, 
-                                    &name, 
-                                    count, 
-                                    preview.as_deref()
+                                    ctx,
+                                    ui,
+                                    index,
+                                    &path,
+                                    &name,
+                                    count,
+                                    preview.as_deref(),
                                 );
 
                                 if clicked {
@@ -263,7 +274,7 @@ impl GalleryView {
 
         let texture_key = format!("thumb_{}", path.display());
         let loaded_texture = self.texture_cache.get(&texture_key);
-        
+
         let bg_color = if is_selected {
             Color32::from_rgb(100, 150, 200)
         } else if response.hovered() {
@@ -288,7 +299,7 @@ impl GalleryView {
             let img_size = texture.size_vec2();
             let scaled_size = fit_size(img_size, inner_rect.size());
             let img_rect = Rect::from_center_size(inner_rect.center(), scaled_size);
-            
+
             ui.painter().image(
                 texture.id(),
                 img_rect,
@@ -310,8 +321,12 @@ impl GalleryView {
             rect.left_bottom() - egui::vec2(0.0, 24.0),
             rect.right_bottom(),
         );
-        ui.painter().rect_filled(name_rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-        
+        ui.painter().rect_filled(
+            name_rect,
+            0.0,
+            Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+        );
+
         // Безопасная обрезка Unicode строки
         let display_name = if name.chars().count() > 25 {
             let truncated: String = name.chars().take(22).collect();
@@ -319,7 +334,7 @@ impl GalleryView {
         } else {
             name.to_string()
         };
-        
+
         ui.painter().text(
             name_rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -357,6 +372,6 @@ fn fit_size(image_size: Vec2, container_size: Vec2) -> Vec2 {
     let ratio_x = container_size.x / image_size.x;
     let ratio_y = container_size.y / image_size.y;
     let ratio = ratio_x.min(ratio_y).min(1.0);
-    
+
     Vec2::new(image_size.x * ratio, image_size.y * ratio)
 }

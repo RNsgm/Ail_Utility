@@ -1,6 +1,12 @@
-﻿use std::io::{Read, Write, Seek, SeekFrom};
+﻿use std::io::{Read, Write};
 
-use super::{AIL_MAGIC, AIL_VERSION, EncoderError};
+use super::{EncoderError, AIL_MAGIC, AIL_VERSION};
+
+const MAX_ENTRY_NAME_LEN: usize = 1024;
+
+fn crypto_err(error: crate::crypto::CryptoError) -> EncoderError {
+    EncoderError::Crypto(error.to_string())
+}
 
 /// Заголовок .ail файла (v2 с превью)
 #[derive(Debug, Clone)]
@@ -54,7 +60,7 @@ impl AilHeader {
     pub fn from_bytes(bytes: &[u8; Self::SIZE]) -> Result<Self, EncoderError> {
         let mut magic = [0u8; 4];
         magic.copy_from_slice(&bytes[0..4]);
-        
+
         if &magic != AIL_MAGIC {
             return Err(EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -146,15 +152,19 @@ impl AilThumbnail {
         // Декодируем изображение
         let img = ImageReader::new(Cursor::new(image_data))
             .with_guessed_format()
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to read image: {}", e),
-            )))?
+            .map_err(|e| {
+                EncoderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to read image: {}", e),
+                ))
+            })?
             .decode()
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to decode image: {}", e),
-            )))?;
+            .map_err(|e| {
+                EncoderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to decode image: {}", e),
+                ))
+            })?;
 
         // Масштабируем
         let (orig_w, orig_h) = (img.width(), img.height());
@@ -171,19 +181,21 @@ impl AilThumbnail {
         // Кодируем в JPEG с качеством 60%
         let mut jpeg_data = Vec::new();
         let mut cursor = Cursor::new(&mut jpeg_data);
-        thumbnail.write_to(&mut cursor, image::ImageFormat::Jpeg)
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to encode thumbnail: {}", e),
-            )))?;
+        thumbnail
+            .write_to(&mut cursor, image::ImageFormat::Jpeg)
+            .map_err(|e| {
+                EncoderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to encode thumbnail: {}", e),
+                ))
+            })?;
 
         // Сжимаем данные (уровень 3 для скорости)
         let mut thumb_data = zstd::encode_all(&jpeg_data[..], 3)?;
 
         // Шифруем превью
         let key = crate::crypto::get_or_create_key();
-        thumb_data = crate::crypto::encrypt(&thumb_data, &key)
-            .map_err(|e| EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        thumb_data = crate::crypto::encrypt(&thumb_data, &key).map_err(crypto_err)?;
 
         Ok(Self {
             width: new_w,
@@ -200,22 +212,28 @@ impl AilThumbnail {
         use image::AnimationDecoder;
         use std::io::Cursor;
 
-        let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(gif_data))
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
+        let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(gif_data)).map_err(|e| {
+            EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Failed to read GIF: {}", e),
-            )))?;
+            ))
+        })?;
 
         let mut frames = decoder.into_frames();
-        let first_frame = frames.next()
-            .ok_or_else(|| EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "GIF has no frames",
-            )))?
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to decode GIF frame: {}", e),
-            )))?;
+        let first_frame = frames
+            .next()
+            .ok_or_else(|| {
+                EncoderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "GIF has no frames",
+                ))
+            })?
+            .map_err(|e| {
+                EncoderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to decode GIF frame: {}", e),
+                ))
+            })?;
 
         let img = first_frame.into_buffer();
         let dynamic_img = image::DynamicImage::ImageRgba8(img);
@@ -223,55 +241,67 @@ impl AilThumbnail {
     }
 
     /// Создает превью из первого кадра видео через FFmpeg
+    #[cfg(feature = "ffmpeg")]
     pub fn from_video(video_data: &[u8], max_size: u32) -> Result<Self, EncoderError> {
-        use ffmpeg_next::format;
         use ffmpeg_next::codec;
+        use ffmpeg_next::format;
         use ffmpeg_next::frame;
         use ffmpeg_next::software::scaling;
         use ffmpeg_next::util::format::Pixel;
 
-        ffmpeg_next::init()
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
+        ffmpeg_next::init().map_err(|e| {
+            EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Failed to initialize FFmpeg: {}", e),
-            )))?;
+            ))
+        })?;
 
         // Записываем во временный файл
         let temp_path = std::env::temp_dir().join("ail_video_thumb.mp4");
-        std::fs::write(&temp_path, video_data)
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
+        std::fs::write(&temp_path, video_data).map_err(|e| {
+            EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Failed to write temp file: {}", e),
-            )))?;
+            ))
+        })?;
 
-        let mut ictx = format::input(&temp_path)
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
+        let mut ictx = format::input(&temp_path).map_err(|e| {
+            EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Failed to open video: {}", e),
-            )))?;
+            ))
+        })?;
 
-        let video_stream_index = ictx.streams().best(ffmpeg_next::media::Type::Video)
-        .ok_or_else(|| EncoderError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "No video stream found",
-        )))?.index();
+        let video_stream_index = ictx
+            .streams()
+            .best(ffmpeg_next::media::Type::Video)
+            .ok_or_else(|| {
+                EncoderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "No video stream found",
+                ))
+            })?
+            .index();
 
-        let stream = ictx.stream(video_stream_index)
-            .ok_or_else(|| EncoderError::Io(std::io::Error::new(
+        let stream = ictx.stream(video_stream_index).ok_or_else(|| {
+            EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Failed to get video stream",
-            )))?;
+            ))
+        })?;
         let decoder_params = stream.parameters();
-        let decoder = codec::context::Context::from_parameters(decoder_params)
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
+        let decoder = codec::context::Context::from_parameters(decoder_params).map_err(|e| {
+            EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Failed to create decoder context: {}", e),
-            )))?;
-        let mut decoder = decoder.decoder().video()
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
+            ))
+        })?;
+        let mut decoder = decoder.decoder().video().map_err(|e| {
+            EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Failed to get video decoder: {}", e),
-            )))?;
+            ))
+        })?;
 
         let mut scaler = scaling::Context::get(
             decoder.format(),
@@ -281,10 +311,13 @@ impl AilThumbnail {
             decoder.width(),
             decoder.height(),
             scaling::Flags::BILINEAR,
-        ).map_err(|e| EncoderError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to create scaler: {}", e),
-        )))?;
+        )
+        .map_err(|e| {
+            EncoderError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create scaler: {}", e),
+            ))
+        })?;
 
         // Получаем первый кадр
         for (_stream, packet) in ictx.packets() {
@@ -312,10 +345,12 @@ impl AilThumbnail {
 
                         // Создаём изображение из RGB
                         let img = image::RgbImage::from_raw(width as u32, height as u32, rgb_data)
-                            .ok_or_else(|| EncoderError::Io(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                "Failed to create image from frame",
-                            )))?;
+                            .ok_or_else(|| {
+                                EncoderError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "Failed to create image from frame",
+                                ))
+                            })?;
 
                         // Удаляем временный файл
                         let _ = std::fs::remove_file(&temp_path);
@@ -354,17 +389,19 @@ impl AilThumbnail {
         // Кодируем в JPEG
         let mut jpeg_data = Vec::new();
         let mut cursor = Cursor::new(&mut jpeg_data);
-        thumbnail.write_to(&mut cursor, image::ImageFormat::Jpeg)
-            .map_err(|e| EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to encode thumbnail: {}", e),
-            )))?;
+        thumbnail
+            .write_to(&mut cursor, image::ImageFormat::Jpeg)
+            .map_err(|e| {
+                EncoderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to encode thumbnail: {}", e),
+                ))
+            })?;
 
         // Сжимаем и шифруем
         let mut thumb_data = zstd::encode_all(&jpeg_data[..], 3)?;
         let key = crate::crypto::get_or_create_key();
-        thumb_data = crate::crypto::encrypt(&thumb_data, &key)
-            .map_err(|e| EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        thumb_data = crate::crypto::encrypt(&thumb_data, &key).map_err(crypto_err)?;
 
         Ok(Self {
             width: new_w,
@@ -507,10 +544,89 @@ impl AilEntry {
         buf.extend_from_slice(&self.md5_hash);
 
         buf
-    }    /// Записывает запись в поток
+    }
+
+    /// Записывает запись в поток
     pub fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_all(&self.to_bytes())
     }
+}
+
+/// Возвращает смещение начала индекса для заголовка v2.
+pub fn index_offset_from_header(header: &AilHeader) -> u64 {
+    if header.thumbnail_size > 0 && header.thumbnail_offset == AilHeader::SIZE as u64 {
+        header.thumbnail_offset + header.thumbnail_size
+    } else {
+        AilHeader::SIZE as u64
+    }
+}
+
+/// Читает записи индекса из потока.
+pub fn read_index_entries<R: Read>(
+    reader: &mut R,
+    count: u32,
+) -> Result<Vec<AilEntry>, EncoderError> {
+    let mut entries = Vec::with_capacity(count as usize);
+
+    for _ in 0..count {
+        let mut name_bytes = Vec::new();
+        let mut found_null = false;
+
+        for _ in 0..MAX_ENTRY_NAME_LEN {
+            let mut byte = [0u8; 1];
+            reader.read_exact(&mut byte)?;
+            if byte[0] == 0 {
+                found_null = true;
+                break;
+            }
+            name_bytes.push(byte[0]);
+        }
+
+        if !found_null {
+            return Err(EncoderError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Filename too long or not null-terminated",
+            )));
+        }
+
+        let original_name = String::from_utf8(name_bytes).map_err(|e| {
+            EncoderError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid UTF-8 in entry name: {e}"),
+            ))
+        })?;
+
+        let mut buf = [0u8; AilEntry::MIN_SIZE];
+        reader.read_exact(&mut buf)?;
+
+        let entry_type = EntryType::from_u8(buf[0]).unwrap_or(EntryType::Image);
+        let compression = CompressionType::from_u8(buf[1]).ok_or_else(|| {
+            EncoderError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid compression type for entry {original_name}"),
+            ))
+        })?;
+
+        let original_size = u64::from_le_bytes(buf[4..12].try_into().unwrap());
+        let compressed_size = u64::from_le_bytes(buf[12..20].try_into().unwrap());
+        let data_offset = u64::from_le_bytes(buf[20..28].try_into().unwrap());
+
+        let mut md5_hash = [0u8; 16];
+        md5_hash.copy_from_slice(&buf[28..44]);
+
+        entries.push(AilEntry {
+            original_name,
+            entry_type,
+            compression,
+            reserved: [buf[2], buf[3]],
+            original_size,
+            compressed_size,
+            data_offset,
+            md5_hash,
+        });
+    }
+
+    Ok(entries)
 }
 
 /// Индекс записей в .ail файле
@@ -528,7 +644,8 @@ impl AilIndex {
 
     /// Вычисляет размер индекса в байтах
     pub fn size(&self) -> u64 {
-        self.entries.iter()
+        self.entries
+            .iter()
             .map(|e| (AilEntry::MIN_SIZE + e.original_name.len() + 1) as u64)
             .sum()
     }
@@ -542,130 +659,12 @@ impl AilIndex {
     }
 }
 
-/// Полный .ail файл (для чтения)
-pub struct AilFile<R: Read + Seek> {
-    reader: R,
-    header: AilHeader,
-    index: AilIndex,
-}
-
-impl<R: Read + Seek> AilFile<R> {
-    /// Открывает .ail файл для чтения
-    pub fn open(mut reader: R) -> Result<Self, EncoderError> {
-        let header = AilHeader::read(&mut reader)?;
-        
-        // Читаем индекс
-        let mut entries = Vec::with_capacity(header.entry_count as usize);
-        
-        for _ in 0..header.entry_count {
-            // Читаем имя файла (null-terminated)
-            let mut name_bytes = Vec::new();
-            loop {
-                let mut byte = [0u8; 1];
-                reader.read_exact(&mut byte)?;
-                if byte[0] == 0 {
-                    break;
-                }
-                name_bytes.push(byte[0]);
-            }
-            let original_name = String::from_utf8_lossy(&name_bytes).to_string();
-
-            // Читаем оставшиеся поля
-            let mut buf = [0u8; AilEntry::MIN_SIZE - 1]; // -1 потому что имя уже прочитано
-            reader.read_exact(&mut buf)?;
-
-            let entry_type = EntryType::from_u8(buf[0])
-                .unwrap_or(EntryType::Image); // Обратная совместимость: старые файлы имеют 0
-
-            let compression = CompressionType::from_u8(buf[1])
-                .ok_or_else(|| EncoderError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Invalid compression type",
-                )))?;
-
-            let original_size = u64::from_le_bytes(buf[4..12].try_into().unwrap());
-            let compressed_size = u64::from_le_bytes(buf[12..20].try_into().unwrap());
-            let data_offset = u64::from_le_bytes(buf[20..28].try_into().unwrap());
-
-            let mut md5_hash = [0u8; 16];
-            md5_hash.copy_from_slice(&buf[28..44]);
-
-            entries.push(AilEntry {
-                original_name,
-                entry_type,
-                compression,
-                reserved: [buf[2], buf[3]],
-                original_size,
-                compressed_size,
-                data_offset,
-                md5_hash,
-            });        }
-        
-        let index = AilIndex::new(entries);
-        
-        Ok(Self {
-            reader,
-            header,
-            index,
-        })
-    }
-
-    /// Возвращает ссылку на заголовок
-    pub fn header(&self) -> &AilHeader {
-        &self.header
-    }
-
-    /// Возвращает ссылку на индекс
-    pub fn index(&self) -> &AilIndex {
-        &self.index
-    }
-
-    /// Читает данные изображения по индексу
-    pub fn read_image(&mut self, index: usize) -> Result<Vec<u8>, EncoderError> {
-        let entry = self.index.entries.get(index)
-            .ok_or_else(|| EncoderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Entry index out of bounds",
-            )))?;
-        
-        self.reader.seek(SeekFrom::Start(entry.data_offset))?;
-        
-        let mut compressed = vec![0u8; entry.compressed_size as usize];
-        self.reader.read_exact(&mut compressed)?;
-        
-        // Декомпрессия
-        let data = match entry.compression {
-            CompressionType::None => compressed,
-            CompressionType::Zstd => {
-                zstd::decode_all(&compressed[..])?
-            }
-            CompressionType::Lz4 => {
-                let mut decoder = lz4::Decoder::new(&compressed[..])?;
-                let mut decompressed = Vec::with_capacity(entry.original_size as usize);
-                std::io::copy(&mut decoder, &mut decompressed)?;
-                decompressed
-            }
-        };
-        
-        Ok(data)
-    }
-
-    /// Возвращает количество изображений
-    pub fn len(&self) -> usize {
-        self.index.entries.len()
-    }
-
-    /// Проверяет, пуст ли файл
-    pub fn is_empty(&self) -> bool {
-        self.index.entries.is_empty()
-    }
-}
-
 /// Помощник для построения .ail файла (v2 с превью)
 pub struct AilBuilder {
     entries: Vec<AilEntry>,
     data_chunks: Vec<Vec<u8>>,
     thumbnail: Option<AilThumbnail>,
+    thumbnail_max_size: u32,
 }
 
 impl AilBuilder {
@@ -675,7 +674,14 @@ impl AilBuilder {
             entries: Vec::new(),
             data_chunks: Vec::new(),
             thumbnail: None,
+            thumbnail_max_size: 300,
         }
+    }
+
+    /// Задает максимальный размер стороны превью
+    pub fn with_thumbnail_size(mut self, size: u32) -> Self {
+        self.thumbnail_max_size = size;
+        self
     }
 
     /// Добавляет изображение в билдер
@@ -687,10 +693,10 @@ impl AilBuilder {
         compression: CompressionType,
     ) -> Result<(), EncoderError> {
         let original_size = data.len() as u64;
-        
+
         // Создаем превью из первого изображения (если еще не создано)
         if self.thumbnail.is_none() {
-            match AilThumbnail::from_image(&data, 300) {
+            match AilThumbnail::from_image(&data, self.thumbnail_max_size) {
                 Ok(thumb) => {
                     self.thumbnail = Some(thumb);
                 }
@@ -699,16 +705,13 @@ impl AilBuilder {
                 }
             }
         }
-        
+
         // Сжимаем данные
         let mut data_to_store = match compression {
             CompressionType::None => data.clone(),
-            CompressionType::Zstd => {
-                zstd::encode_all(&data[..], 3)?
-            }
+            CompressionType::Zstd => zstd::encode_all(&data[..], 3)?,
             CompressionType::Lz4 => {
-                let mut encoder = lz4::EncoderBuilder::new()
-                    .build(Vec::new())?;
+                let mut encoder = lz4::EncoderBuilder::new().build(Vec::new())?;
                 std::io::copy(&mut &data[..], &mut encoder)?;
                 let (compressed, result) = encoder.finish();
                 result?;
@@ -718,16 +721,15 @@ impl AilBuilder {
 
         // Шифруем данные (AES-256-GCM)
         let key = crate::crypto::get_or_create_key();
-        data_to_store = crate::crypto::encrypt(&data_to_store, &key)
-            .map_err(|e| EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-        
+        data_to_store = crate::crypto::encrypt(&data_to_store, &key).map_err(crypto_err)?;
+
         let compressed_size = data_to_store.len() as u64;
-        
+
         // Вычисляем MD5 хеш
         let md5_hash = md5::compute(&data).into();
-        
+
         self.data_chunks.push(data_to_store);
-        
+
         let entry = AilEntry::new(
             original_name,
             compression,
@@ -752,12 +754,15 @@ impl AilBuilder {
 
         // Создаем превью из первого кадра видео (если еще не создано)
         if self.thumbnail.is_none() {
-            match AilThumbnail::from_video(&data, 300) {
-                Ok(thumb) => {
-                    self.thumbnail = Some(thumb);
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to create video thumbnail: {}", e);
+            #[cfg(feature = "ffmpeg")]
+            {
+                match AilThumbnail::from_video(&data, self.thumbnail_max_size) {
+                    Ok(thumb) => {
+                        self.thumbnail = Some(thumb);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create video thumbnail: {e}");
+                    }
                 }
             }
         }
@@ -765,12 +770,9 @@ impl AilBuilder {
         // Сжимаем данные
         let mut data_to_store = match compression {
             CompressionType::None => data.clone(),
-            CompressionType::Zstd => {
-                zstd::encode_all(&data[..], 3)?
-            }
+            CompressionType::Zstd => zstd::encode_all(&data[..], 3)?,
             CompressionType::Lz4 => {
-                let mut encoder = lz4::EncoderBuilder::new()
-                    .build(Vec::new())?;
+                let mut encoder = lz4::EncoderBuilder::new().build(Vec::new())?;
                 std::io::copy(&mut &data[..], &mut encoder)?;
                 let (compressed, result) = encoder.finish();
                 result?;
@@ -780,8 +782,7 @@ impl AilBuilder {
 
         // Шифруем данные (AES-256-GCM)
         let key = crate::crypto::get_or_create_key();
-        data_to_store = crate::crypto::encrypt(&data_to_store, &key)
-            .map_err(|e| EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        data_to_store = crate::crypto::encrypt(&data_to_store, &key).map_err(crypto_err)?;
 
         let compressed_size = data_to_store.len() as u64;
         let md5_hash = md5::compute(&data).into();
@@ -804,51 +805,55 @@ impl AilBuilder {
     /// Собирает .ail файл и записывает его в поток    
     pub fn build<W: Write>(mut self, writer: &mut W) -> Result<(), EncoderError> {
         let entry_count = self.entries.len() as u32;
-        
+
         // Размер секции превью
-        let thumbnail_size = self.thumbnail.as_ref()
+        let thumbnail_size = self
+            .thumbnail
+            .as_ref()
             .map(|t| t.total_size() as u64)
             .unwrap_or(0);
-        
+
         // Структура файла:
         // [Header][Thumbnail][Index][Data...]
-        
+
         let header_size = AilHeader::SIZE as u64;
         let thumbnail_offset = header_size;
         let index_offset = thumbnail_offset + thumbnail_size;
-        let index_size: u64 = self.entries.iter()
+        let index_size: u64 = self
+            .entries
+            .iter()
             .map(|e| (AilEntry::MIN_SIZE + e.original_name.len() + 1) as u64)
             .sum();
         let data_offset = index_offset + index_size;
-        
+
         // Создаем заголовок
         let header = AilHeader::new(entry_count, thumbnail_offset, thumbnail_size);
-        
+
         // Обновляем смещения данных для записей
         let mut current_offset = data_offset;
         for (entry, chunk) in self.entries.iter_mut().zip(&self.data_chunks) {
             entry.data_offset = current_offset;
             current_offset += chunk.len() as u64;
         }
-        
+
         // Записываем заголовок
         header.write(writer)?;
-        
+
         // Записываем секцию превью
         if let Some(thumb) = &self.thumbnail {
             writer.write_all(&thumb.header_to_bytes())?;
             writer.write_all(&thumb.data)?;
         }
-        
+
         // Записываем индекс
         let index = AilIndex::new(self.entries);
         index.write(writer)?;
-        
+
         // Записываем данные
         for chunk in &self.data_chunks {
             writer.write_all(chunk)?;
         }
-        
+
         Ok(())
     }
 }

@@ -1,5 +1,6 @@
 use crate::viewer::thread_util::spawn_worker;
 use crate::{log_error, log_info};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

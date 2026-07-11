@@ -83,34 +83,40 @@ impl VideoPlayer {
                 self.seek_to(ctx, 0.0);
             }
 
-            let clock = self.playback_clock();
+            self.try_show_due_frame(ctx);
+        }
 
-            if let Some((image, pts)) = self.next_frame.take() {
-                if pts <= clock + 0.05 {
-                    self.show_frame(ctx, image, pts);
-                } else {
-                    self.next_frame = Some((image, pts));
-                }
-            }
-
-            while self.next_frame.is_none() {
-                match self.receiver.try_recv() {
-                    Ok((image, pts)) => {
-                        if pts <= clock + 0.05 {
-                            self.show_frame(ctx, image, pts);
-                        } else {
-                            self.next_frame = Some((image, pts));
-                            break;
-                        }
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
-                }
+        if !self.is_paused {
+            if let Some((_, next_pts)) = &self.next_frame {
+                let wait = (*next_pts - self.playback_clock()).max(0.0);
+                ctx.request_repaint_after(Duration::from_secs_f64(wait.min(0.25)));
+            } else {
+                ctx.request_repaint();
             }
         }
 
-        ctx.request_repaint();
         self.current_texture.as_ref()
+    }
+
+    fn try_show_due_frame(&mut self, ctx: &Context) {
+        let clock = self.playback_clock();
+
+        if let Some((image, pts)) = self.next_frame.take() {
+            if pts <= clock + 0.001 {
+                self.show_frame(ctx, image, pts);
+                return;
+            }
+            self.next_frame = Some((image, pts));
+            return;
+        }
+
+        if let Ok((image, pts)) = self.receiver.try_recv() {
+            if pts <= clock + 0.001 {
+                self.show_frame(ctx, image, pts);
+            } else {
+                self.next_frame = Some((image, pts));
+            }
+        }
     }
 
     fn show_frame(&mut self, ctx: &Context, image: egui::ColorImage, pts: f64) {
@@ -120,8 +126,6 @@ impl VideoPlayer {
             TextureOptions::LINEAR,
         );
         self.current_texture = Some(texture);
-        self.playback_pts = pts;
-        self.playback_origin = Instant::now();
     }
 
     pub fn toggle_pause(&mut self) {

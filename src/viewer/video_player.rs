@@ -22,6 +22,7 @@ pub struct VideoPlayer {
     pub looping: bool,
     pub volume: f32,
     decode_cancel: Option<Arc<AtomicBool>>,
+    decode_paused: Arc<AtomicBool>,
     need_seek_frame: bool,
     decode_finished: bool,
     frame_seq: u64,
@@ -40,14 +41,14 @@ impl VideoPlayer {
 
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(FRAME_BUFFER);
         let cancel = Arc::new(AtomicBool::new(false));
+        let decode_paused = Arc::new(AtomicBool::new(false));
         let path = temp_path.clone();
         let cancel_worker = cancel.clone();
+        let paused_worker = decode_paused.clone();
 
         spawn_worker("video_decode", move || {
-            decode_video_frames(&path, frame_tx, 0.0, cancel_worker);
+            decode_video_frames(&path, frame_tx, 0.0, cancel_worker, paused_worker);
         });
-
-        let audio = AudioPlayer::start(temp_path.clone(), 0.0);
 
         let player = Self {
             receiver: frame_rx,
@@ -61,10 +62,11 @@ impl VideoPlayer {
             looping: false,
             volume: 1.0,
             decode_cancel: Some(cancel),
+            decode_paused,
             need_seek_frame: true,
             decode_finished: false,
             frame_seq: 0,
-            audio,
+            audio: None,
         };
 
         ctx.request_repaint();
@@ -77,6 +79,7 @@ impl VideoPlayer {
                 self.playback_pts = pts;
                 self.playback_origin = Instant::now();
                 self.show_frame(ctx, image, pts);
+                self.ensure_audio();
                 self.need_seek_frame = false;
                 self.decode_finished = false;
             } else {
@@ -122,30 +125,54 @@ impl VideoPlayer {
     }
 
     fn try_show_due_frame(&mut self, ctx: &Context) {
-        let clock = self.playback_clock();
+        loop {
+            let clock = self.playback_clock();
 
-        if let Some((image, pts)) = self.next_frame.take() {
+            let candidate = if let Some(frame) = self.next_frame.take() {
+                Some(frame)
+            } else {
+                match self.receiver.try_recv() {
+                    Ok(frame) => Some(frame),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => {
+                        self.decode_finished = true;
+                        return;
+                    }
+                }
+            };
+
+            let Some((image, pts)) = candidate else {
+                break;
+            };
+
+            if pts + 0.15 < clock {
+                continue;
+            }
+
             if pts <= clock + 0.001 {
                 self.show_frame(ctx, image, pts);
+                self.ensure_audio();
                 return;
             }
+
             self.next_frame = Some((image, pts));
             return;
         }
+    }
 
-        match self.receiver.try_recv() {
-            Ok((image, pts)) => {
-                if pts <= clock + 0.001 {
-                    self.show_frame(ctx, image, pts);
-                } else {
-                    self.next_frame = Some((image, pts));
-                }
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                self.decode_finished = true;
-            }
+    fn ensure_audio(&mut self) {
+        if self.audio.is_some() {
+            return;
         }
+        let start = self.playback_pts;
+        let Some(audio) = AudioPlayer::start(self.temp_path.clone(), start) else {
+            return;
+        };
+        audio.set_volume(self.volume);
+        if self.is_paused {
+            audio.pause();
+        }
+        self.audio = Some(audio);
     }
 
     fn show_frame(&mut self, ctx: &Context, image: egui::ColorImage, _pts: f64) {
@@ -162,6 +189,7 @@ impl VideoPlayer {
     pub fn toggle_pause(&mut self) {
         if self.is_paused {
             self.is_paused = false;
+            self.decode_paused.store(false, Ordering::Relaxed);
             self.playback_origin = Instant::now();
             if let Some(audio) = &self.audio {
                 audio.resume();
@@ -169,6 +197,7 @@ impl VideoPlayer {
         } else {
             self.playback_pts = self.playback_clock();
             self.is_paused = true;
+            self.decode_paused.store(true, Ordering::Relaxed);
             if let Some(audio) = &self.audio {
                 audio.pause();
             }
@@ -198,6 +227,11 @@ impl VideoPlayer {
         }
     }
 
+    pub fn seek_relative(&mut self, ctx: &Context, delta: f64) {
+        let target = (self.playback_clock() + delta).clamp(0.0, self.duration.max(0.0));
+        self.seek_to(ctx, target);
+    }
+
     pub fn seek_to(&mut self, ctx: &Context, target: f64) {
         let target = target.clamp(0.0, self.duration.max(0.0));
         let was_paused = self.is_paused;
@@ -213,9 +247,10 @@ impl VideoPlayer {
         let cancel = Arc::new(AtomicBool::new(false));
         let path = self.temp_path.clone();
         let cancel_worker = cancel.clone();
+        let paused_worker = self.decode_paused.clone();
 
         spawn_worker("video_seek", move || {
-            decode_video_frames(&path, frame_tx, target, cancel_worker);
+            decode_video_frames(&path, frame_tx, target, cancel_worker, paused_worker);
         });
 
         self.receiver = frame_rx;
@@ -454,6 +489,7 @@ fn decode_video_frames(
     sender: SyncSender<(egui::ColorImage, f64)>,
     start_time: f64,
     cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
 ) {
     #[cfg(feature = "ffmpeg")]
     {
@@ -478,6 +514,10 @@ fn decode_video_frames(
             if cancel.load(Ordering::Relaxed) {
                 log_info!("decode_video_frames: cancelled path={}", path.display());
                 break;
+            }
+
+            while paused.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(16));
             }
 
             let frame = match crate::ffmpeg_util::with_ffmpeg(|| decoder.next_frame()) {
@@ -526,6 +566,6 @@ fn decode_video_frames(
 
     #[cfg(not(feature = "ffmpeg"))]
     {
-        let _ = (path, sender, start_time, cancel);
+        let _ = (path, sender, start_time, cancel, paused);
     }
 }

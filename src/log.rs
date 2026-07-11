@@ -114,14 +114,16 @@ fn init_windows_console() {
     const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4u32;
 
     unsafe {
-        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+        let attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+        if !attached {
             AllocConsole();
-        }
-
-        if let Ok(conout) = OpenOptions::new().write(true).open("CONOUT$") {
-            let handle = conout.as_raw_handle();
-            SetStdHandle(STD_OUTPUT_HANDLE, handle);
-            SetStdHandle(STD_ERROR_HANDLE, handle);
+            // Only rewire handles for a fresh console; attaching to the parent
+            // already routes stderr and duplicating CONOUT causes double lines.
+            if let Ok(conout) = OpenOptions::new().write(true).open("CONOUT$") {
+                let handle = conout.as_raw_handle();
+                SetStdHandle(STD_OUTPUT_HANDLE, handle);
+                SetStdHandle(STD_ERROR_HANDLE, handle);
+            }
         }
     }
 }

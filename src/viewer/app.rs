@@ -31,8 +31,12 @@ impl ViewerApp {
     pub fn run() -> eframe::Result {
         #[cfg(feature = "ffmpeg")]
         if let Err(e) = crate::ffmpeg_util::ensure_initialized() {
-            eprintln!("Warning: FFmpeg init failed: {e}");
+            crate::log_error!("FFmpeg init at startup failed: {e}");
+        } else {
+            crate::log_info!("FFmpeg init at startup OK");
         }
+
+        crate::log_info!("ViewerApp::run starting");
 
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()

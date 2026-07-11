@@ -1,6 +1,7 @@
 use crate::encoder::{
     collect_encoding_jobs, encode_media_to_ail, CompressionType, EncodeOptions, EncodeStatus,
 };
+use crate::log_info;
 use crate::viewer::thread_util::spawn_worker;
 use egui::{Color32, Context, RichText, Ui};
 use std::path::PathBuf;
@@ -221,6 +222,7 @@ impl EncoderView {
 
         spawn_worker("encoder", move || {
             let total = jobs.len();
+            log_info!("Encoder: starting {total} jobs");
             for (i, job) in jobs.into_iter().enumerate() {
                 let _ = tx.send(EncodeMessage::Progress {
                     current: i + 1,

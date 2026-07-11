@@ -7,6 +7,7 @@ use crate::encoder::temp_video_path;
 #[cfg(feature = "ffmpeg")]
 use crate::encoder::video_convert::{convert_to_mp4, is_tts_file, mp4_output_path};
 use crate::encoder::{AilBuilder, ArchiveType, CompressionType, EncoderError, MediaType};
+use crate::log_info;
 
 /// Настройки кодирования
 #[derive(Debug, Clone)]
@@ -361,6 +362,11 @@ fn decode_video_frames(
     })?;
 
     let result = with_ffmpeg_enc(|| {
+        log_info!(
+            "decode_video_frames(encode): temp={} hint={name_hint} data_len={}",
+            temp_path.display(),
+            data.len()
+        );
         let mut ictx = format::input(&temp_path).map_err(|e| {
             EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -510,12 +516,18 @@ fn encode_video_file_to_ail(
     output_path: &Path,
     options: &EncodeOptions,
 ) -> Result<(), EncoderError> {
+    log_info!(
+        "encode_video_file_to_ail: input={} output={}",
+        input_path.display(),
+        output_path.display()
+    );
     let converted_path = if is_tts_file(input_path) {
         let temp = std::env::temp_dir().join(format!(
             "ail_convert_{}_{}.mp4",
             std::process::id(),
             input_path.file_name().unwrap_or_default().to_string_lossy()
         ));
+        log_info!("encode_video: converting TTS -> {}", temp.display());
         convert_to_mp4(input_path, &temp)?;
         Some(temp)
     } else {
@@ -523,6 +535,12 @@ fn encode_video_file_to_ail(
     };
 
     let video_path = converted_path.as_deref().unwrap_or(input_path);
+    let meta = std::fs::metadata(video_path).ok();
+    log_info!(
+        "encode_video: reading {} ({} bytes)",
+        video_path.display(),
+        meta.map(|m| m.len()).unwrap_or(0)
+    );
 
     let data = std::fs::read(video_path)?;
     let name = if converted_path.is_some() {
@@ -541,11 +559,13 @@ fn encode_video_file_to_ail(
 
     let mut builder = AilBuilder::new().with_thumbnail_size(options.thumbnail_size);
     builder.add_video_blob(name, data, options.compression)?;
+    log_info!("encode_video: built blob name={name}");
 
     let output_file = File::create(output_path)?;
     let mut writer = std::io::BufWriter::new(output_file);
     builder.build(&mut writer)?;
     writer.flush()?;
+    log_info!("encode_video: OK -> {}", output_path.display());
 
     if let Some(temp) = converted_path {
         let _ = std::fs::remove_file(temp);
@@ -565,8 +585,18 @@ pub fn encode_media_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
     let output_path = output_path.as_ref();
 
     if options.skip_existing && output_path.is_file() {
+        log_info!(
+            "encode_media_to_ail: SKIP existing {}",
+            output_path.display()
+        );
         return Ok(EncodeStatus::Skipped);
     }
+
+    log_info!(
+        "encode_media_to_ail: input={} output={}",
+        input_path.display(),
+        output_path.display()
+    );
 
     if input_path.is_dir() {
         encode_from_directory(input_path, output_path, Some(options))?;

@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+﻿use std::io::{Read, Write};
 
 use super::{EncoderError, AIL_MAGIC, AIL_VERSION};
 
@@ -255,6 +255,11 @@ impl AilThumbnail {
 
         let hint = name_hint.unwrap_or("video.mp4");
         let temp_path = crate::encoder::temp_video_path("ail_video_thumb", hint);
+        crate::log_info!(
+            "AilThumbnail::from_video: hint={hint} data_len={} temp={}",
+            video_data.len(),
+            temp_path.display()
+        );
         std::fs::write(&temp_path, video_data).map_err(|e| {
             EncoderError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -332,9 +337,14 @@ impl AilThumbnail {
 
             Err("Failed to extract video frame".to_string())
         })
-        .map_err(|e| EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            crate::log_error!("AilThumbnail::from_video failed: {e}");
+            EncoderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+        })?;
 
         let _ = std::fs::remove_file(&temp_path);
+        crate::log_info!("AilThumbnail::from_video: OK");
         Ok(thumb)
     }
 

@@ -1,4 +1,6 @@
-use crate::encoder::{collect_convertible_files, convert_to_mp4, mp4_output_path, needs_mp4_conversion};
+use crate::encoder::{
+    collect_convertible_files, convert_to_mp4, mp4_output_path, needs_mp4_conversion,
+};
 use egui::{Color32, Context, RichText, Ui};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -44,10 +46,8 @@ impl ConverterView {
         ui.vertical(|ui| {
             ui.heading("Конвертер TTS → MP4");
             ui.label(
-                RichText::new(
-                    "Файлы .tts и .mp4.tts: автоопределение и конвертация в обычный MP4",
-                )
-                .color(Color32::GRAY),
+                RichText::new("Файлы .tts и .mp4.tts: автоопределение и конвертация в обычный MP4")
+                    .color(Color32::GRAY),
             );
             ui.add_space(10.0);
 
@@ -124,7 +124,10 @@ impl ConverterView {
             if self.is_converting {
                 ui.add(
                     egui::ProgressBar::new(self.progress.0 as f32 / self.progress.1.max(1) as f32)
-                        .text(format!("Конвертация {}/{}", self.progress.0, self.progress.1)),
+                        .text(format!(
+                            "Конвертация {}/{}",
+                            self.progress.0, self.progress.1
+                        )),
                 );
                 ui.label(format!("Текущий: {}", self.current_file));
             } else {
@@ -132,8 +135,7 @@ impl ConverterView {
                 if ui
                     .add_enabled(
                         can_start,
-                        egui::Button::new("🎬 Конвертировать в MP4")
-                            .min_size([200.0, 40.0].into()),
+                        egui::Button::new("🎬 Конвертировать в MP4").min_size([200.0, 40.0].into()),
                     )
                     .clicked()
                 {
@@ -299,8 +301,7 @@ impl ConverterView {
                         self.logs.push((format!("⏭ Пропущен: {name}"), false));
                     }
                     ConvertMessage::Error(name, err) => {
-                        self.logs
-                            .push((format!("❌ Ошибка {name}: {err}"), true));
+                        self.logs.push((format!("❌ Ошибка {name}: {err}"), true));
                     }
                     ConvertMessage::Done => {
                         self.is_converting = false;

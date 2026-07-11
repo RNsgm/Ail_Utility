@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::encoder::{ArchiveType, is_media_file};
+use crate::encoder::{is_media_file, ArchiveType};
 
 /// Одна задача кодирования: один вход → один `.ail`.
 #[derive(Debug, Clone)]
@@ -16,10 +16,7 @@ pub fn is_archive(path: &Path) -> bool {
 
 /// Разворачивает выбранные пути в отдельные задания.
 /// Каждый архив в папке → отдельный `.ail`.
-pub fn collect_encoding_jobs(
-    roots: &[PathBuf],
-    output_dir: Option<&Path>,
-) -> Vec<EncodingJob> {
+pub fn collect_encoding_jobs(roots: &[PathBuf], output_dir: Option<&Path>) -> Vec<EncodingJob> {
     let mut jobs = Vec::new();
 
     for root in roots {

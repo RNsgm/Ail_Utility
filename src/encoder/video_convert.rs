@@ -124,11 +124,10 @@ fn try_ffmpeg_remux(input: &Path, output: &Path) -> Result<(), EncoderError> {
 
     let _ = std::fs::remove_file(output);
 
-    ffmpeg_next::init()
-        .map_err(|e| EncoderError::VideoConvert(format!("FFmpeg init: {e}")))?;
+    ffmpeg_next::init().map_err(|e| EncoderError::VideoConvert(format!("FFmpeg init: {e}")))?;
 
-    let mut ictx = format::input(input)
-        .map_err(|e| EncoderError::VideoConvert(format!("Open input: {e}")))?;
+    let mut ictx =
+        format::input(input).map_err(|e| EncoderError::VideoConvert(format!("Open input: {e}")))?;
     let mut octx = format::output(output)
         .map_err(|e| EncoderError::VideoConvert(format!("Create output: {e}")))?;
 
@@ -160,7 +159,9 @@ fn try_ffmpeg_remux(input: &Path, output: &Path) -> Result<(), EncoderError> {
     }
 
     if ost_index == 0 {
-        return Err(EncoderError::VideoConvert("No streams in TTS file".to_string()));
+        return Err(EncoderError::VideoConvert(
+            "No streams in TTS file".to_string(),
+        ));
     }
 
     octx.set_metadata(ictx.metadata().to_owned());
@@ -230,13 +231,7 @@ fn try_ffmpeg_cli(input: &Path, output: &Path) -> Result<(), EncoderError> {
     let _ = std::fs::remove_file(output);
 
     let status = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-        ])
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
         .arg(input)
         .args([
             "-c",
@@ -267,17 +262,16 @@ mod tests {
     #[test]
     fn detects_tts_extension() {
         assert!(is_tts_file(Path::new("video.tts")));
-        assert!(is_tts_file(Path::new("cd58bc21aa3fc3355e311eac7b477072.mp4.tts")));
+        assert!(is_tts_file(Path::new(
+            "cd58bc21aa3fc3355e311eac7b477072.mp4.tts"
+        )));
         assert!(!is_tts_file(Path::new("movie.mp4")));
     }
 
     #[test]
     fn mp4_output_strips_tts_suffix() {
         let input = Path::new("clip.mp4.tts");
-        assert_eq!(
-            mp4_output_path(input),
-            Path::new("clip.mp4")
-        );
+        assert_eq!(mp4_output_path(input), Path::new("clip.mp4"));
         assert_eq!(
             mp4_output_path(Path::new("clip.tts")),
             Path::new("clip.mp4")

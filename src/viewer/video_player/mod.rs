@@ -79,14 +79,8 @@ impl VideoPlayer {
         } else if !self.clock.is_paused() && !self.stream_ended {
             if self.looping && self.clock.reached_end() {
                 self.seek_to(ctx, 0.0);
-            } else {
-                let mut frame_to_show = None;
-                while let Some(frame) = self.queue.pop_due(now, self.displayed_pts) {
-                    frame_to_show = Some(frame);
-                }
-                if let Some(frame) = frame_to_show {
-                    self.display_frame(ctx, frame);
-                }
+            } else if let Some(frame) = self.queue.pop_due(now, self.displayed_pts) {
+                self.display_frame(ctx, frame);
             }
         }
 
@@ -213,11 +207,12 @@ impl VideoPlayer {
         }
 
         let now = self.clock.now();
+        let frame_step = 1.0 / self.fps.max(1.0);
         if let Some(next_pts) = self.queue.next_pts_after(self.displayed_pts) {
-            let wait = (next_pts - now).max(0.0);
-            ctx.request_repaint_after(Duration::from_secs_f64(wait.min(0.05)));
+            let wait = (next_pts - now).max(0.0).min(frame_step);
+            ctx.request_repaint_after(Duration::from_secs_f64(wait.max(0.008)));
         } else {
-            ctx.request_repaint_after(Duration::from_secs_f64(1.0 / self.fps.max(1.0)));
+            ctx.request_repaint_after(Duration::from_secs_f64(frame_step.min(0.05)));
         }
     }
 }

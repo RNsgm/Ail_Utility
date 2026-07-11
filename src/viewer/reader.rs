@@ -1,5 +1,6 @@
 ﻿use crate::decoder::AilDecoder;
 use crate::encoder::MediaType;
+use crate::viewer::theme::{self, media_bar_frame, toolbar_frame};
 use crate::viewer::texture_loader::{
     load_color_images_from_memory, load_gif_color_images, GifFrame, TextureCache,
 };
@@ -26,6 +27,18 @@ pub enum ReaderMode {
     FitWindow,
     Original,
     Zoom(f32),
+}
+
+impl ReaderMode {
+    fn label(self) -> &'static str {
+        match self {
+            ReaderMode::FitWindow => "По окну",
+            ReaderMode::FitWidth => "По ширине",
+            ReaderMode::FitHeight => "По высоте",
+            ReaderMode::Original => "Оригинал",
+            ReaderMode::Zoom(_) => "Масштаб",
+        }
+    }
 }
 
 impl Default for ReaderMode {
@@ -340,9 +353,7 @@ impl ReaderView {
         self.handle_input(ctx, &mut response);
 
         if self.total_pages == 0 && self.load_receiver.is_none() {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("Нет открытого файла").size(24.0));
-            });
+            theme::empty_state(ui, "Нет открытого файла", "Выберите .ail в галерее");
             return response;
         }
 
@@ -356,81 +367,93 @@ impl ReaderView {
             .to_string();
 
         if self.show_ui {
-            egui::Panel::top("reader_top").show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("<- Назад").clicked() {
-                        response.close_requested = true;
-                    }
-
-                    ui.separator();
-                    ui.label(format!("{} / {}", self.current_page + 1, total_pages));
-                    ui.separator();
-                    ui.label(&title);
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        egui::ComboBox::from_label("")
-                            .selected_text(format!("{:?}", self.mode))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.mode,
-                                    ReaderMode::FitWindow,
-                                    "По окну",
-                                );
-                                ui.selectable_value(
-                                    &mut self.mode,
-                                    ReaderMode::FitWidth,
-                                    "По ширине",
-                                );
-                                ui.selectable_value(
-                                    &mut self.mode,
-                                    ReaderMode::FitHeight,
-                                    "По высоте",
-                                );
-                                ui.selectable_value(
-                                    &mut self.mode,
-                                    ReaderMode::Original,
-                                    "Оригинал",
-                                );
-                            });
-
-                        if ui.button("⏭").clicked() {
-                            self.next_page();
+            egui::Panel::top("reader_top")
+                .frame(toolbar_frame())
+                .show_inside(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("← Галерея").clicked() {
+                            response.close_requested = true;
                         }
-                        if ui.button("⏮").clicked() {
-                            self.prev_page();
+
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!(
+                                "{} / {}",
+                                self.current_page + 1,
+                                total_pages
+                            ))
+                            .color(theme::accent()),
+                        );
+                        ui.separator();
+                        ui.label(RichText::new(&title).strong());
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            egui::ComboBox::from_label("Масштаб")
+                                .selected_text(self.mode.label())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.mode,
+                                        ReaderMode::FitWindow,
+                                        "По окну",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.mode,
+                                        ReaderMode::FitWidth,
+                                        "По ширине",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.mode,
+                                        ReaderMode::FitHeight,
+                                        "По высоте",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.mode,
+                                        ReaderMode::Original,
+                                        "Оригинал",
+                                    );
+                                });
+
+                            if ui.button("След. ▶").clicked() {
+                                self.next_page();
+                            }
+                            if ui.button("◀ Пред.").clicked() {
+                                self.prev_page();
+                            }
+                        });
+                    });
+                });
+
+            egui::Panel::bottom("reader_bottom")
+                .frame(toolbar_frame())
+                .show_inside(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Страница:");
+                        let mut page = self.current_page + 1;
+                        if ui
+                            .add(egui::DragValue::new(&mut page).range(1..=total_pages))
+                            .changed()
+                        {
+                            self.go_to_page(page.saturating_sub(1));
+                        }
+                        ui.label(format!("/ {total_pages}"));
+
+                        ui.add_space(20.0);
+                        let mut progress = self.current_page as f32;
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut progress,
+                                    0.0..=(total_pages.saturating_sub(1)) as f32,
+                                )
+                                .show_value(false)
+                                .trailing_fill(true),
+                            )
+                            .changed()
+                        {
+                            self.go_to_page(progress as usize);
                         }
                     });
                 });
-            });
-
-            egui::Panel::bottom("reader_bottom").show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Страница:");
-                    let mut page = self.current_page + 1;
-                    if ui
-                        .add(egui::DragValue::new(&mut page).range(1..=total_pages))
-                        .changed()
-                    {
-                        self.go_to_page(page.saturating_sub(1));
-                    }
-                    ui.label(format!("/ {}", total_pages));
-
-                    ui.add_space(20.0);
-                    let mut progress = self.current_page as f32;
-                    if ui
-                        .add(
-                            egui::Slider::new(
-                                &mut progress,
-                                0.0..=(total_pages.saturating_sub(1)) as f32,
-                            )
-                            .show_value(false),
-                        )
-                        .changed()
-                    {
-                        self.go_to_page(progress as usize);
-                    }
-                });
-            });
         }
 
         let current_page = self.current_page;
@@ -559,19 +582,21 @@ impl ReaderView {
         });
 
         // GIF controls
-        ui.horizontal(|ui| {
-            if ui
-                .button(if self.gif_looping { "🔁" } else { "➡" })
-                .on_hover_text("Loop")
-                .clicked()
-            {
-                self.gif_looping = !self.gif_looping;
-            }
-            ui.label(format!(
-                "Кадр {} / {}",
-                self.gif_current_frame + 1,
-                frames.len()
-            ));
+        media_bar_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(if self.gif_looping { "🔁" } else { "➡" })
+                    .on_hover_text("Повтор")
+                    .clicked()
+                {
+                    self.gif_looping = !self.gif_looping;
+                }
+                ui.label(format!(
+                    "Кадр {} / {}",
+                    self.gif_current_frame + 1,
+                    frames.len()
+                ));
+            });
         });
     }
 
@@ -626,39 +651,45 @@ impl ReaderView {
         let elapsed = player.elapsed().clamp(0.0, player.duration);
         let mut seek_target = None;
 
-        ui.horizontal(|ui| {
-            if ui
-                .button(if player.is_paused { "▶" } else { "⏸" })
-                .clicked()
-            {
-                player.toggle_pause();
-            }
+        media_bar_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(if player.is_paused { "▶" } else { "⏸" })
+                    .clicked()
+                {
+                    player.toggle_pause();
+                }
 
-            if ui
-                .button(if player.looping { "🔁" } else { "➡" })
-                .on_hover_text("Loop")
-                .clicked()
-            {
-                player.looping = !player.looping;
-            }
+                if ui
+                    .button(if player.looping { "🔁" } else { "➡" })
+                    .on_hover_text("Повтор")
+                    .clicked()
+                {
+                    player.looping = !player.looping;
+                }
 
-            ui.label(format!(
-                "{} / {}",
-                fmt_time(elapsed),
-                fmt_time(player.duration)
-            ));
+                ui.label(
+                    RichText::new(format!(
+                        "{} / {}",
+                        fmt_time(elapsed),
+                        fmt_time(player.duration)
+                    ))
+                    .monospace()
+                    .color(theme::text_muted()),
+                );
 
-            let slider_width = ui.available_width() - 20.0;
-            let mut slider_val = elapsed;
-            let resp = ui.add_sized(
-                [slider_width.max(50.0), 20.0],
-                egui::Slider::new(&mut slider_val, 0.0..=player.duration)
-                    .show_value(false)
-                    .trailing_fill(true),
-            );
-            if resp.changed() {
-                seek_target = Some(slider_val);
-            }
+                let slider_width = ui.available_width() - 20.0;
+                let mut slider_val = elapsed;
+                let resp = ui.add_sized(
+                    [slider_width.max(50.0), 20.0],
+                    egui::Slider::new(&mut slider_val, 0.0..=player.duration)
+                        .show_value(false)
+                        .trailing_fill(true),
+                );
+                if resp.changed() {
+                    seek_target = Some(slider_val);
+                }
+            });
         });
 
         if let Some(target) = seek_target {

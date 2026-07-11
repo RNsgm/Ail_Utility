@@ -1,8 +1,9 @@
 use crate::encoder::{
     collect_convertible_files, convert_to_mp4, mp4_output_path, needs_mp4_conversion,
 };
+use crate::viewer::theme::{self, primary_button};
 use crate::viewer::thread_util::spawn_worker;
-use egui::{Color32, Context, RichText, Ui};
+use egui::{Context, Ui};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -44,23 +45,22 @@ impl ConverterView {
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) {
         self.process_messages();
 
+        ui.add_space(8.0);
         ui.vertical(|ui| {
-            ui.heading("Конвертер TTS → MP4");
-            ui.label(
-                RichText::new("Файлы .tts и .mp4.tts: автоопределение и конвертация в обычный MP4")
-                    .color(Color32::GRAY),
+            theme::page_header(
+                ui,
+                "Конвертер TTS → MP4",
+                Some("Файлы .tts и .mp4.tts → обычный MP4"),
             );
-            ui.add_space(10.0);
 
-            ui.group(|ui| {
-                ui.label("1. Выбор файлов и папок");
-                ui.horizontal(|ui| {
-                    if ui.button("➕ Добавить файлы").clicked() {
+            theme::section_card(ui, "1. Источники", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("➕ Файлы").clicked() {
                         if let Some(files) = rfd::FileDialog::new().pick_files() {
                             self.add_paths(files);
                         }
                     }
-                    if ui.button("📁 Добавить папку").clicked() {
+                    if ui.button("📁 Папка").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                             self.add_paths([folder]);
                         }
@@ -74,11 +74,13 @@ impl ConverterView {
                 });
 
                 let convertible = self.count_convertible();
-                ui.label(format!(
-                    "Источников: {}, файлов к конвертации: {}",
-                    self.input_paths.len(),
-                    convertible
-                ));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Источников: {}, к конвертации: {convertible}",
+                        self.input_paths.len()
+                    ))
+                    .color(theme::text_muted()),
+                );
 
                 if !self.input_paths.is_empty() {
                     egui::ScrollArea::vertical()
@@ -88,8 +90,6 @@ impl ConverterView {
                                 let icon = if path.is_dir() { "📁" } else { "📄" };
                                 let tag = if path.is_file() && needs_mp4_conversion(path) {
                                     " [TTS]"
-                                } else if path.is_file() {
-                                    ""
                                 } else {
                                     ""
                                 };
@@ -99,12 +99,11 @@ impl ConverterView {
                 }
             });
 
-            ui.add_space(5.0);
+            ui.add_space(8.0);
 
-            ui.group(|ui| {
-                ui.label("2. Папка сохранения");
+            theme::section_card(ui, "2. Папка сохранения", |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("📁 Выбрать папку").clicked() {
+                    if ui.button("📁 Выбрать").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                             self.output_dir = Some(folder);
                         }
@@ -113,14 +112,14 @@ impl ConverterView {
                         ui.label(dir.to_string_lossy());
                     } else {
                         ui.label(
-                            RichText::new("Не выбрана (MP4 рядом с исходником)")
-                                .color(Color32::GOLD),
+                            egui::RichText::new("Не выбрана — MP4 рядом с исходником")
+                                .color(theme::text_hint()),
                         );
                     }
                 });
             });
 
-            ui.add_space(10.0);
+            ui.add_space(12.0);
 
             if self.is_converting {
                 ui.add(
@@ -128,36 +127,22 @@ impl ConverterView {
                         .text(format!(
                             "Конвертация {}/{}",
                             self.progress.0, self.progress.1
-                        )),
+                        ))
+                        .fill(theme::accent()),
                 );
-                ui.label(format!("Текущий: {}", self.current_file));
+                ui.label(
+                    egui::RichText::new(format!("Текущий: {}", self.current_file))
+                        .color(theme::text_muted()),
+                );
             } else {
                 let can_start = self.count_convertible() > 0;
-                if ui
-                    .add_enabled(
-                        can_start,
-                        egui::Button::new("🎬 Конвертировать в MP4").min_size([200.0, 40.0].into()),
-                    )
-                    .clicked()
-                {
+                if primary_button(ui, "🎬 Конвертировать в MP4", can_start).clicked() {
                     self.start_conversion(ctx);
                 }
             }
 
-            ui.add_space(10.0);
-            ui.label("Логи:");
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for (msg, is_err) in self.logs.iter().rev() {
-                        let color = if *is_err {
-                            Color32::LIGHT_RED
-                        } else {
-                            Color32::LIGHT_GREEN
-                        };
-                        ui.label(RichText::new(msg).color(color));
-                    }
-                });
+            ui.add_space(12.0);
+            theme::log_panel(ui, 200.0, &self.logs);
         });
     }
 
@@ -275,8 +260,7 @@ impl ConverterView {
                 match convert_to_mp4(&path, &out_path) {
                     Ok(_) => {
                         let _ = tx.send(ConvertMessage::Success(format!(
-                            "{} → {}",
-                            name,
+                            "{name} → {}",
                             out_path.display()
                         )));
                     }

@@ -1,7 +1,8 @@
 use crate::decoder::AilInfo;
 use crate::viewer::texture_loader::{load_color_images_from_memory, TextureCache};
+use crate::viewer::theme::{self, THUMB_RADIUS};
 use crate::viewer::thread_util::spawn_worker;
-use egui::{Color32, Context, Key, Rect, RichText, Sense, Ui, Vec2};
+use egui::{Context, Key, Rect, RichText, Sense, Ui, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -39,7 +40,6 @@ impl GalleryView {
         self.texture_cache.clear();
         self.selected_item = None;
 
-        // Запускаем загрузку в фоне с передачей Context для repaint
         let ctx = ctx.clone();
         let (tx, rx) = channel::<GalleryMessage>();
         self.load_receiver = Some(rx);
@@ -63,7 +63,6 @@ impl GalleryView {
                 let path = entry.path();
                 match AilInfo::from_path(path.clone()) {
                     Ok(info) => {
-                        // Декодируем превью в пиксели прямо здесь, в фоне!
                         let color_images = info
                             .preview_data
                             .as_ref()
@@ -84,7 +83,6 @@ impl GalleryView {
     }
 
     fn process_load_messages(&mut self, ctx: &Context) {
-        // Берем receiver во временную переменную
         let receiver = self.load_receiver.take();
 
         if let Some(rx) = receiver {
@@ -94,7 +92,6 @@ impl GalleryView {
                     GalleryMessage::FileLoaded(info, color_image) => {
                         let texture_key = format!("thumb_{}", info.path.display());
 
-                        // Если есть готовые пиксели, создаем текстуру мгновенно
                         if let Some(ci) = color_image {
                             let _ = self
                                 .texture_cache
@@ -107,16 +104,14 @@ impl GalleryView {
                 }
                 if received_count >= 5 {
                     break;
-                } // Лимит на кадр для плавности
+                }
             }
 
-            // Сортируем если получили новые файлы
             if received_count > 0 {
                 self.ail_files
                     .sort_by(|a, b| alphanumeric_sort::compare_str(&a.name, &b.name));
             }
 
-            // Возвращаем receiver обратно
             self.load_receiver = Some(rx);
         } else if self.loading {
             self.loading = false;
@@ -130,10 +125,8 @@ impl GalleryView {
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) -> GalleryResponse {
         let mut response = GalleryResponse::default();
 
-        // Обрабатываем сообщения от фонового потока
         self.process_load_messages(ctx);
 
-        // Обработка скролла клавишами в библиотеке
         let scroll_delta = ctx.input(|i| {
             let mut delta = 0.0;
             if i.key_down(Key::ArrowDown) {
@@ -155,48 +148,63 @@ impl GalleryView {
             ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
         }
 
-        ui.horizontal(|ui| {
-            ui.heading("Gallery");
-            ui.separator();
-
-            if ui.button("📁 Open Folder").clicked() {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    self.set_folder(ctx, folder);
-                }
-            }
-
-            if let Some(folder) = &self.current_folder {
-                ui.label(format!("📂 {}", folder.display()));
+        theme::toolbar_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Галерея")
+                        .size(18.0)
+                        .strong()
+                        .color(theme::text()),
+                );
                 ui.separator();
 
-                if self.loading {
-                    ui.label(format!("Loading... {} found", self.ail_files.len()));
-                } else {
-                    ui.label(format!("{} files", self.ail_files.len()));
+                if ui.button("📁 Открыть папку").clicked() {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        self.set_folder(ctx, folder);
+                    }
                 }
-            }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::Slider::new(&mut self.thumbnail_size, 100.0..=400.0).text("Size"));
+                if let Some(folder) = &self.current_folder {
+                    ui.label(
+                        RichText::new(format!("📂 {}", folder.display()))
+                            .color(theme::text_muted()),
+                    );
+                    ui.separator();
+
+                    let status = if self.loading {
+                        format!("Загрузка… {} найдено", self.ail_files.len())
+                    } else {
+                        format!("{} файлов", self.ail_files.len())
+                    };
+                    ui.label(RichText::new(status).color(theme::text_muted()));
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut self.thumbnail_size, 100.0..=400.0)
+                            .text("Размер"),
+                    );
+                });
             });
         });
 
-        ui.separator();
+        ui.add_space(8.0);
 
         if self.ail_files.is_empty() && !self.loading {
-            ui.vertical_centered(|ui| {
-                ui.add_space(100.0);
-                if self.current_folder.is_none() {
-                    ui.label(RichText::new("Select folder with .ail files").size(20.0));
-                } else {
-                    ui.label(RichText::new("No .ail files in folder").size(20.0));
-                }
-            });
+            if self.current_folder.is_none() {
+                theme::empty_state(
+                    ui,
+                    "Выберите папку",
+                    "Откройте каталог с .ail файлами для просмотра",
+                );
+            } else {
+                theme::empty_state(ui, "Нет .ail файлов", "В этой папке нет архивов AIL");
+            }
         } else if self.loading && self.ail_files.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(100.0);
                 ui.spinner();
-                ui.label("Scanning files...");
+                ui.label(RichText::new("Сканирование…").color(theme::text_muted()));
             });
         } else {
             self.render_grid(ctx, ui, &mut response);
@@ -276,26 +284,19 @@ impl GalleryView {
         let texture_key = format!("thumb_{}", path.display());
         let loaded_texture = self.texture_cache.get(&texture_key);
 
-        let bg_color = if is_selected {
-            Color32::from_rgb(100, 150, 200)
-        } else if response.hovered() {
-            Color32::from_rgb(60, 60, 70)
-        } else {
-            Color32::from_rgb(40, 40, 45)
-        };
+        let (bg_color, stroke) = theme::thumb_colors(is_selected, response.hovered());
+        ui.painter().rect_filled(rect, THUMB_RADIUS, bg_color);
 
-        ui.painter().rect_filled(rect, 8.0, bg_color);
-
-        if is_selected {
+        if let Some(stroke) = stroke {
             ui.painter().rect_stroke(
                 rect,
-                8.0,
-                egui::Stroke::new(3.0, Color32::from_rgb(100, 200, 255)),
-                egui::StrokeKind::Middle,
+                THUMB_RADIUS,
+                stroke,
+                egui::StrokeKind::Inside,
             );
         }
 
-        let inner_rect = rect.shrink(8.0);
+        let inner_rect = rect.shrink(10.0);
         if let Some(ref texture) = loaded_texture {
             let img_size = texture.size_vec2();
             let scaled_size = fit_size(img_size, inner_rect.size());
@@ -305,33 +306,27 @@ impl GalleryView {
                 texture.id(),
                 img_rect,
                 Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
+                egui::Color32::WHITE,
             );
         } else {
-            let center = inner_rect.center();
             ui.painter().text(
-                center,
+                inner_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "",
-                egui::FontId::proportional(self.thumbnail_size * 0.3),
-                Color32::from_gray(100),
+                "AIL",
+                egui::FontId::proportional(self.thumbnail_size * 0.14),
+                theme::text_muted(),
             );
         }
 
         let name_rect = Rect::from_min_max(
-            rect.left_bottom() - egui::vec2(0.0, 24.0),
+            rect.left_bottom() - egui::vec2(0.0, 26.0),
             rect.right_bottom(),
         );
-        ui.painter().rect_filled(
-            name_rect,
-            0.0,
-            Color32::from_rgba_unmultiplied(0, 0, 0, 180),
-        );
+        ui.painter().rect_filled(name_rect, 0.0, egui::Color32::from_rgba_unmultiplied(8, 10, 14, 200));
 
-        // Безопасная обрезка Unicode строки
         let display_name = if name.chars().count() > 25 {
             let truncated: String = name.chars().take(22).collect();
-            format!("{}...", truncated)
+            format!("{truncated}…")
         } else {
             name.to_string()
         };
@@ -341,17 +336,24 @@ impl GalleryView {
             egui::Align2::CENTER_CENTER,
             display_name,
             egui::FontId::proportional(12.0),
-            Color32::WHITE,
+            theme::text(),
         );
 
-        let count_text = format!("{} ", count);
-        ui.painter().text(
-            rect.right_top() + egui::vec2(-8.0, 8.0),
-            egui::Align2::RIGHT_TOP,
-            count_text,
-            egui::FontId::proportional(11.0),
-            Color32::from_rgb(200, 200, 200),
-        );
+        if count > 1 {
+            let badge_rect = Rect::from_min_size(
+                rect.right_top() + egui::vec2(-36.0, 8.0),
+                Vec2::new(28.0, 18.0),
+            );
+            ui.painter()
+                .rect_filled(badge_rect, 6.0, theme::accent_bg());
+            ui.painter().text(
+                badge_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                count.to_string(),
+                egui::FontId::proportional(11.0),
+                theme::text(),
+            );
+        }
 
         response.clicked()
     }

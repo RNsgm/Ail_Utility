@@ -3,6 +3,7 @@ mod converter_view;
 mod encoder_view;
 mod gallery;
 mod reader;
+mod theme;
 mod texture_loader;
 mod thread_util;
 mod video_player;

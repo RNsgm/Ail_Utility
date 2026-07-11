@@ -19,6 +19,15 @@ impl PlaybackClock {
         }
     }
 
+    pub fn new_paused(duration: f64, position: f64) -> Self {
+        Self {
+            anchor_secs: position.max(0.0),
+            anchor_instant: Instant::now(),
+            paused: true,
+            duration: duration.max(0.0),
+        }
+    }
+
     pub fn is_paused(&self) -> bool {
         self.paused
     }

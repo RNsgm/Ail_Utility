@@ -3,7 +3,7 @@ use crate::{log_error, log_info};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,6 +18,8 @@ pub struct AudioPlayer {
     cancel: Arc<AtomicBool>,
     volume: Arc<AtomicU32>,
     buffer: Arc<Mutex<VecDeque<f32>>>,
+    samples_played: Arc<AtomicU64>,
+    start_pts: f64,
     sample_rate: u32,
     channels: usize,
     _stream: cpal::Stream,
@@ -33,6 +35,8 @@ impl AudioPlayer {
 
         let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(AUDIO_BUFFER_SAMPLES)));
         let buffer_cb = buffer.clone();
+        let samples_played = Arc::new(AtomicU64::new(0));
+        let samples_cb = samples_played.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let volume = Arc::new(AtomicU32::new(1000));
         let volume_cb = volume.clone();
@@ -42,6 +46,7 @@ impl AudioPlayer {
                 &config.into(),
                 move |data: &mut [f32], _| {
                     let vol = volume_cb.load(Ordering::Relaxed) as f32 / 1000.0;
+                    samples_cb.fetch_add(data.len() as u64, Ordering::Relaxed);
                     let mut guard = match buffer_cb.lock() {
                         Ok(g) => g,
                         Err(_) => return,
@@ -62,6 +67,8 @@ impl AudioPlayer {
             cancel: cancel.clone(),
             volume,
             buffer: buffer.clone(),
+            samples_played,
+            start_pts: start_time,
             sample_rate,
             channels,
             _stream: stream,
@@ -89,11 +96,22 @@ impl AudioPlayer {
         let _ = self._stream.play();
     }
 
+    pub fn playback_time(&self) -> f64 {
+        let samples = self.samples_played.load(Ordering::Relaxed) as f64;
+        let rate = self.sample_rate as f64 * self.channels as f64;
+        if rate <= 0.0 {
+            return self.start_pts;
+        }
+        self.start_pts + samples / rate
+    }
+
     pub fn restart(&mut self, path: PathBuf, start_time: f64) {
         self.cancel.store(true, Ordering::Relaxed);
         if let Ok(mut guard) = self.buffer.lock() {
             guard.clear();
         }
+        self.samples_played.store(0, Ordering::Relaxed);
+        self.start_pts = start_time;
         let _ = self._stream.pause();
         self.cancel = Arc::new(AtomicBool::new(false));
         self.spawn_decode(path, start_time);

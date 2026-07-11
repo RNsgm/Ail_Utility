@@ -114,7 +114,7 @@ pub fn apply(ctx: &Context) {
     w.open.bg_fill = card_hover();
 
     style.visuals = visuals;
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 pub fn card_frame() -> Frame {

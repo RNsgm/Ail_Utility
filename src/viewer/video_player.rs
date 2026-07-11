@@ -85,12 +85,11 @@ impl VideoPlayer {
 
             let clock = self.playback_clock();
 
-            if let Some((ref image, pts)) = self.next_frame {
+            if let Some((image, pts)) = self.next_frame.take() {
                 if pts <= clock + 0.05 {
-                    let image = image.clone();
-                    let pts = *pts;
-                    self.next_frame = None;
                     self.show_frame(ctx, image, pts);
+                } else {
+                    self.next_frame = Some((image, pts));
                 }
             }
 
@@ -276,9 +275,9 @@ impl VideoDecoderState {
         .max(1.0);
 
         let decoder_params = stream.parameters();
-        let mut decoder = codec::context::Context::from_parameters(decoder_params)
+        let decoder_ctx = codec::context::Context::from_parameters(decoder_params)
             .map_err(|e| e.to_string())?;
-        let mut decoder = decoder.decoder().video().map_err(|e| e.to_string())?;
+        let mut decoder = decoder_ctx.decoder().video().map_err(|e| e.to_string())?;
 
         let waiting_keyframe = start_time > 0.0;
         if waiting_keyframe {

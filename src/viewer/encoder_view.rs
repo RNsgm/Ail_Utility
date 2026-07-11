@@ -46,7 +46,7 @@ impl EncoderView {
             ui.heading("Кодировщик в .ail");
             ui.label(
                 RichText::new(
-                    "Архивы (zip/rar/7z) → галерея из картинок; отдельные видео (mkv, mp4, …) → video blob",
+                    "Папка с картинками → один .ail-галерея; каждое видео в папке → свой .ail; архивы → отдельно",
                 )
                 .color(Color32::GRAY),
             );

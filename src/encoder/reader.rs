@@ -6,9 +6,7 @@ use std::path::Path;
 use crate::encoder::temp_video_path;
 #[cfg(feature = "ffmpeg")]
 use crate::encoder::video_convert::{convert_to_mp4, is_tts_file, mp4_output_path};
-use crate::encoder::{
-    is_media_file, is_video_file, AilBuilder, ArchiveType, CompressionType, EncoderError, MediaType,
-};
+use crate::encoder::{AilBuilder, ArchiveType, CompressionType, EncoderError, MediaType};
 
 /// Настройки кодирования
 #[derive(Debug, Clone)]
@@ -68,43 +66,6 @@ impl EncodeOptions {
     }
 }
 
-enum MediaItem {
-    Image { name: String, data: Vec<u8> },
-    Video { name: String, data: Vec<u8> },
-}
-
-fn push_media_item(items: &mut Vec<MediaItem>, name: String, data: Vec<u8>) {
-    if is_video_file(&name) {
-        items.push(MediaItem::Video { name, data });
-    } else {
-        items.push(MediaItem::Image { name, data });
-    }
-}
-
-fn add_media_items_to_builder(
-    builder: &mut AilBuilder,
-    items: Vec<MediaItem>,
-    compression: CompressionType,
-) -> Result<(), EncoderError> {
-    for item in items {
-        match item {
-            MediaItem::Image { name, data } => builder.add_image(name, data, compression)?,
-            MediaItem::Video { name, data } => {
-                #[cfg(feature = "ffmpeg")]
-                builder.add_video_blob(name, data, compression)?;
-                #[cfg(not(feature = "ffmpeg"))]
-                {
-                    let _ = data;
-                    return Err(EncoderError::VideoConvert(format!(
-                        "Video file \"{name}\" requires ffmpeg feature"
-                    )));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Кодирует архив (zip или rar) в файл .ail
 pub fn encode_archive_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
     archive_path: P,
@@ -152,7 +113,7 @@ pub fn encode_archive_to_ail<P: AsRef<Path>, Q: AsRef<Path>>(
     Ok(())
 }
 
-/// Кодирует директорию с изображениями в файл .ail
+/// Кодирует директорию с изображениями в файл .ail (видео в папке кодируются отдельно)
 pub fn encode_from_directory<P: AsRef<Path>, Q: AsRef<Path>>(
     dir_path: P,
     output_path: Q,
@@ -160,7 +121,7 @@ pub fn encode_from_directory<P: AsRef<Path>, Q: AsRef<Path>>(
 ) -> Result<(), EncoderError> {
     let options = options.unwrap_or_default();
     let mut builder = AilBuilder::new().with_thumbnail_size(options.thumbnail_size);
-    let mut items: Vec<MediaItem> = Vec::new();
+    let mut images: Vec<(String, Vec<u8>)> = Vec::new();
 
     let dir = std::fs::read_dir(dir_path)?;
 
@@ -172,7 +133,7 @@ pub fn encode_from_directory<P: AsRef<Path>, Q: AsRef<Path>>(
             continue;
         }
 
-        if !is_media_file(&path) {
+        if !crate::encoder::is_image_file(&path) {
             continue;
         }
 
@@ -183,26 +144,20 @@ pub fn encode_from_directory<P: AsRef<Path>, Q: AsRef<Path>>(
             .unwrap_or_else(|| "unknown".to_string());
 
         let data = std::fs::read(&path)?;
-        push_media_item(&mut items, name, data);
+        images.push((name, data));
     }
 
-    if items.is_empty() {
+    if images.is_empty() {
         return Err(EncoderError::NoImagesFound);
     }
 
     if options.sort_by_name {
-        items.sort_by(|a, b| {
-            let name_a = match a {
-                MediaItem::Image { name, .. } | MediaItem::Video { name, .. } => name,
-            };
-            let name_b = match b {
-                MediaItem::Image { name, .. } | MediaItem::Video { name, .. } => name,
-            };
-            alphanumeric_sort::compare_str(name_a, name_b)
-        });
+        images.sort_by(|a, b| alphanumeric_sort::compare_str(&a.0, &b.0));
     }
 
-    add_media_items_to_builder(&mut builder, items, options.compression)?;
+    for (name, data) in images {
+        builder.add_image(name, data, options.compression)?;
+    }
 
     // Создаем выходной файл
     let output_file = File::create(output_path)?;

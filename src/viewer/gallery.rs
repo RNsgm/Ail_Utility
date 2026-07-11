@@ -2,7 +2,7 @@ use crate::decoder::AilInfo;
 use crate::viewer::texture_loader::{load_color_images_from_memory, TextureCache};
 use crate::viewer::theme::{self, THUMB_RADIUS};
 use crate::viewer::thread_util::spawn_worker;
-use egui::{Context, Key, Rect, RichText, Sense, Ui, Vec2};
+use egui::{Context, Rect, RichText, Sense, Ui, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -127,152 +127,164 @@ impl GalleryView {
 
         self.process_load_messages(ctx);
 
-        let scroll_delta = ctx.input(|i| {
-            let mut delta = 0.0;
-            if i.key_down(Key::ArrowDown) {
-                delta -= 40.0;
-            }
-            if i.key_down(Key::ArrowUp) {
-                delta += 40.0;
-            }
-            if i.key_pressed(Key::PageDown) {
-                delta -= 600.0;
-            }
-            if i.key_pressed(Key::PageUp) {
-                delta += 600.0;
-            }
-            delta
-        });
+        ui.vertical(|ui| {
+            self.render_toolbar(ctx, ui);
+            ui.add_space(8.0);
 
-        if scroll_delta != 0.0 {
-            ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
-        }
+            let scroll_height = ui.available_height();
+            egui::ScrollArea::vertical()
+                .id_salt("gallery_main_scroll")
+                .auto_shrink([false; 2])
+                .max_height(scroll_height.max(100.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(theme::CONTENT_PAD);
+                        ui.vertical(|ui| {
+                            let width = ui.available_width();
+                            ui.set_max_width(width);
 
-        theme::toolbar_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.add_space(theme::CONTENT_PAD - 12.0);
-                ui.label(
-                    RichText::new("Галерея")
-                        .size(18.0)
-                        .strong()
-                        .color(theme::text()),
-                );
-                ui.separator();
-
-                if ui.button("📁 Открыть папку").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        self.set_folder(ctx, folder);
-                    }
-                }
-
-                if let Some(folder) = &self.current_folder {
-                    ui.label(
-                        RichText::new(format!("📂 {}", folder.display()))
-                            .color(theme::text_muted()),
-                    );
-                    ui.separator();
-
-                    let status = if self.loading {
-                        format!("Загрузка… {} найдено", self.ail_files.len())
-                    } else {
-                        format!("{} файлов", self.ail_files.len())
-                    };
-                    ui.label(RichText::new(status).color(theme::text_muted()));
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add(
-                        egui::Slider::new(&mut self.thumbnail_size, 100.0..=400.0)
-                            .text("Размер"),
-                    );
-                    ui.add_space(theme::CONTENT_PAD - 12.0);
-                });
-            });
-        });
-
-        ui.add_space(12.0);
-
-        ui.horizontal(|ui| {
-            ui.add_space(theme::CONTENT_PAD);
-            ui.vertical(|ui| {
-                if self.ail_files.is_empty() && !self.loading {
-                    if self.current_folder.is_none() {
-                        theme::empty_state(
-                            ui,
-                            "Выберите папку",
-                            "Откройте каталог с .ail файлами для просмотра",
-                        );
-                    } else {
-                        theme::empty_state(ui, "Нет .ail файлов", "В этой папке нет архивов AIL");
-                    }
-                } else if self.loading && self.ail_files.is_empty() {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(100.0);
-                        ui.spinner();
-                        ui.label(RichText::new("Сканирование…").color(theme::text_muted()));
+                            if self.ail_files.is_empty() && !self.loading {
+                                if self.current_folder.is_none() {
+                                    theme::empty_state(
+                                        ui,
+                                        "Выберите папку",
+                                        "Откройте каталог с .ail файлами для просмотра",
+                                    );
+                                } else {
+                                    theme::empty_state(
+                                        ui,
+                                        "Нет .ail файлов",
+                                        "В этой папке нет архивов AIL",
+                                    );
+                                }
+                            } else if self.loading && self.ail_files.is_empty() {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(100.0);
+                                    ui.spinner();
+                                    ui.label(
+                                        RichText::new("Сканирование…").color(theme::text_muted()),
+                                    );
+                                });
+                            } else {
+                                self.render_grid(ctx, ui, &mut response);
+                            }
+                        });
+                        ui.add_space(theme::CONTENT_PAD);
                     });
-                } else {
-                    self.render_grid(ctx, ui, &mut response);
-                }
-            });
-            ui.add_space(theme::CONTENT_PAD);
+                    ui.add_space(16.0);
+                });
         });
 
         response
     }
 
-    fn render_grid(&mut self, ctx: &Context, ui: &mut Ui, response: &mut GalleryResponse) {
-        let available_width = ui.available_width();
-        let spacing = 16.0;
-        let item_width = self.thumbnail_size;
-        let columns = ((available_width + spacing) / (item_width + spacing)) as usize;
-        let columns = columns.max(1);
-        let rows = (self.ail_files.len() + columns - 1) / columns;
+    fn render_toolbar(&mut self, ctx: &Context, ui: &mut Ui) {
+        theme::toolbar_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(theme::CONTENT_PAD);
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("Галерея")
+                                .size(18.0)
+                                .strong()
+                                .color(theme::text()),
+                        );
+                        ui.add_space(8.0);
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .show_rows(ui, item_width + spacing, rows, |ui, row_range| {
-                egui::Grid::new("gallery_grid")
-                    .num_columns(columns)
-                    .spacing([spacing, spacing])
-                    .show(ui, |ui| {
-                        for row in row_range {
-                            for col in 0..columns {
-                                let index = row * columns + col;
-                                if index >= self.ail_files.len() {
-                                    break;
-                                }
-
-                                let (path, name, count, preview) = {
-                                    let file = &self.ail_files[index];
-                                    (
-                                        file.path.clone(),
-                                        file.name.clone(),
-                                        file.image_count,
-                                        file.preview_data.clone(),
-                                    )
-                                };
-
-                                let clicked = self.render_thumbnail(
-                                    ctx,
-                                    ui,
-                                    index,
-                                    &path,
-                                    &name,
-                                    count,
-                                    preview.as_deref(),
-                                );
-
-                                if clicked {
-                                    self.selected_item = Some(index);
-                                    response.clicked_index = Some(index);
-                                    response.clicked_file = Some(path);
-                                }
+                        if ui.button("📁 Открыть папку").clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                self.set_folder(ctx, folder);
                             }
-                            ui.end_row();
+                        }
+
+                        if let Some(folder) = &self.current_folder {
+                            ui.label(
+                                RichText::new(format!("📂 {}", folder.display()))
+                                    .color(theme::text_muted()),
+                            );
+
+                            let status = if self.loading {
+                                format!("Загрузка… {} найдено", self.ail_files.len())
+                            } else {
+                                format!("{} файлов", self.ail_files.len())
+                            };
+                            ui.label(RichText::new(status).color(theme::text_muted()));
                         }
                     });
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Размер превью").color(theme::text_muted()));
+                        ui.add(
+                            egui::Slider::new(&mut self.thumbnail_size, 100.0..=400.0)
+                                .show_value(true),
+                        );
+                    });
+                });
+                ui.add_space(theme::CONTENT_PAD);
             });
+        });
+    }
+
+    fn render_grid(&mut self, ctx: &Context, ui: &mut Ui, response: &mut GalleryResponse) {
+        let spacing = 16.0;
+        let item_size = self.thumbnail_size;
+        let available_width = ui.available_width();
+        if available_width <= 0.0 {
+            return;
+        }
+
+        let columns =
+            ((available_width + spacing) / (item_size + spacing)).floor() as usize;
+        let columns = columns.max(1);
+
+        let mut index = 0;
+        let total = self.ail_files.len();
+
+        while index < total {
+            ui.horizontal(|ui| {
+                for col in 0..columns {
+                    if index >= total {
+                        break;
+                    }
+
+                    let (path, name, count, preview) = {
+                        let file = &self.ail_files[index];
+                        (
+                            file.path.clone(),
+                            file.name.clone(),
+                            file.image_count,
+                            file.preview_data.clone(),
+                        )
+                    };
+
+                    let clicked = self.render_thumbnail(
+                        ctx,
+                        ui,
+                        index,
+                        &path,
+                        &name,
+                        count,
+                        preview.as_deref(),
+                    );
+
+                    if clicked {
+                        self.selected_item = Some(index);
+                        response.clicked_index = Some(index);
+                        response.clicked_file = Some(path);
+                    }
+
+                    index += 1;
+                    if col + 1 < columns && index < total {
+                        ui.add_space(spacing);
+                    }
+                }
+            });
+            if index < total {
+                ui.add_space(spacing);
+            }
+        }
     }
 
     fn render_thumbnail(
@@ -330,7 +342,11 @@ impl GalleryView {
             rect.left_bottom() - egui::vec2(0.0, 26.0),
             rect.right_bottom(),
         );
-        ui.painter().rect_filled(name_rect, 0.0, egui::Color32::from_rgba_unmultiplied(8, 10, 14, 200));
+        ui.painter().rect_filled(
+            name_rect,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(8, 10, 14, 200),
+        );
 
         let display_name = if name.chars().count() > 25 {
             let truncated: String = name.chars().take(22).collect();

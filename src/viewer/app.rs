@@ -68,7 +68,7 @@ impl eframe::App for ViewerApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::panel())
-                    .inner_margin(egui::Margin::symmetric(16, 20))
+                    .inner_margin(egui::Margin::symmetric(18, 22))
                     .stroke(egui::Stroke::new(1.0, theme::border())),
             )
             .show_inside(ui, |ui| {
@@ -109,39 +109,41 @@ impl eframe::App for ViewerApp {
                 });
             });
 
-        match self.mode {
-            AppMode::Gallery => {
-                let response = self.gallery.ui(&ctx, ui);
+        ui.vertical(|ui| {
+            match self.mode {
+                AppMode::Gallery => {
+                    let response = self.gallery.ui(&ctx, ui);
 
-                if let Some(path) = response.clicked_file {
-                    self.reader.open_file(&ctx, path);
-                    self.mode = AppMode::Reader;
-                }
-            }
-            AppMode::Reader => {
-                let response = self.reader.ui(&ctx, ui);
-
-                if response.close_requested {
-                    self.reader.close();
-                    self.gallery.clear_selection();
-                    self.mode = AppMode::Gallery;
-                    if self.fullscreen {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                        self.fullscreen = false;
+                    if let Some(path) = response.clicked_file {
+                        self.reader.open_file(&ctx, path);
+                        self.mode = AppMode::Reader;
                     }
                 }
-                if response.toggle_fullscreen {
-                    self.fullscreen = !self.fullscreen;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+                AppMode::Reader => {
+                    let response = self.reader.ui(&ctx, ui);
+
+                    if response.close_requested {
+                        self.reader.close();
+                        self.gallery.clear_selection();
+                        self.mode = AppMode::Gallery;
+                        if self.fullscreen {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                            self.fullscreen = false;
+                        }
+                    }
+                    if response.toggle_fullscreen {
+                        self.fullscreen = !self.fullscreen;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+                    }
+                }
+                AppMode::Encoder => {
+                    self.encoder.ui(&ctx, ui);
+                }
+                AppMode::Converter => {
+                    self.converter.ui(&ctx, ui);
                 }
             }
-            AppMode::Encoder => {
-                self.encoder.ui(&ctx, ui);
-            }
-            AppMode::Converter => {
-                self.converter.ui(&ctx, ui);
-            }
-        }
+        });
     }
 }
 
